@@ -412,8 +412,15 @@ async def _collect_pagination_diagnostics(page: Page) -> dict:
     )
 
 
-async def diagnose_pagination(headless: bool = True) -> dict:
-    """快速收集分页/滚动容器信息，不点击通知、不写数据库、不发邮件。"""
+async def diagnose_pagination(
+    headless: bool = True,
+    wait_for_user: bool = False,
+) -> dict:
+    """收集分页/滚动容器信息，不点击通知、不写数据库、不发邮件。
+
+    交互诊断使用有头浏览器，并在开发者确认列表可见后再读取 DOM，避免
+    校园门户偶发慢加载导致空白诊断结果。
+    """
     if not settings.auth_file.exists():
         raise SessionExpiredError("未找到 auth.json，请先运行 python main.py init-auth")
     async with async_playwright() as pw:
@@ -421,13 +428,34 @@ async def diagnose_pagination(headless: bool = True) -> dict:
         context = await browser.new_context(storage_state=settings.auth_file)
         page = await context.new_page()
         try:
-            await _goto_with_retry(page, settings.notices_url)
+            try:
+                await _goto_with_retry(page, settings.notices_url)
+            except Exception:
+                if not wait_for_user:
+                    raise
+                log.exception(
+                    "自动打开门户失败；请在已打开的浏览器中手动刷新或访问通知页"
+                )
+            if wait_for_user:
+                print(
+                    "请在 Chromium 中确认通知列表已经完整显示；如未显示，可手动刷新或登录。"
+                )
+                await asyncio.to_thread(
+                    input,
+                    "确认列表可见后，回到此终端按 Enter 采集分页信息：",
+                )
             await page.wait_for_timeout(settings.spa_wait_ms)
             if await _is_login_page(page):
                 raise SessionExpiredError("会话已过期，请重新手动登录")
-            list_selector = await _wait_for_list(page, timeout_ms=45_000)
+            list_selector = await _wait_for_list(
+                page,
+                timeout_ms=10_000 if wait_for_user else 45_000,
+            )
             if not list_selector:
-                raise RuntimeError("SPA 在 45 秒内未渲染通知列表，无法诊断分页")
+                raise RuntimeError(
+                    "未检测到通知列表；请确认浏览器中确实显示列表，"
+                    "并检查 LIST_ITEM_SELECTORS 配置"
+                )
             return await _collect_pagination_diagnostics(page)
         finally:
             await context.close()

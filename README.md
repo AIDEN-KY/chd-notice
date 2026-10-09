@@ -95,3 +95,14 @@ pytest
 ```
 
 GitHub Actions 会在每次 push 和 pull request 时执行 Ruff、pytest 和字节码编译。
+
+### 分页诊断
+
+如需适配门户分页控件，运行：
+
+```powershell
+.\.venv\Scripts\python.exe main.py diagnose-pagination
+```
+
+程序会打开有头 Chromium。确认通知列表完整显示后回到终端按 Enter，程序只读取
+分页结构并输出 JSON，不点击通知、不写数据库，也不发送邮件。

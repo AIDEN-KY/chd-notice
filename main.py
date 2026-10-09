@@ -82,7 +82,10 @@ def main() -> None:
     if args.command == "init-auth":
         asyncio.run(initialize_auth())
     elif args.command == "diagnose-pagination":
-        print(json.dumps(asyncio.run(diagnose_pagination()), ensure_ascii=False, indent=2))
+        diagnostics = asyncio.run(
+            diagnose_pagination(headless=False, wait_for_user=True)
+        )
+        print(json.dumps(diagnostics, ensure_ascii=False, indent=2))
     elif args.command == "scrape":
         stats = asyncio.run(scrape_notices())
         print(
