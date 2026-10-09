@@ -15,6 +15,7 @@ from db import init_db  # noqa: E402
 from healthcheck import run_healthcheck  # noqa: E402
 from scraper import initialize_auth, scrape_notices  # noqa: E402
 from service import run_daily, send_pending_today  # noqa: E402
+from version import VERSION  # noqa: E402
 
 
 def configure_logging() -> None:
@@ -58,6 +59,7 @@ def run_scheduler() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="长安大学通知监控与每日邮件推送系统")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument(
         "command", choices=["doctor", "init-auth", "scrape", "send-now", "send-pending", "scheduler"],
         help="配置检查 / 初始化登录 / 立即抓取 / 完整日报 / 仅发送今日待发通知 / 启动定时器",
@@ -70,8 +72,11 @@ def main() -> None:
     if args.command == "init-auth":
         asyncio.run(initialize_auth())
     elif args.command == "scrape":
-        count = asyncio.run(scrape_notices())
-        print(f"抓取完成，新增 {count} 条")
+        stats = asyncio.run(scrape_notices())
+        print(
+            f"抓取完成：新增 {stats.new} 条，更新 {stats.updated} 条，"
+            f"未变化 {stats.unchanged} 条，建立基线 {stats.baselined} 条"
+        )
     elif args.command == "send-now":
         asyncio.run(run_daily())
     elif args.command == "send-pending":

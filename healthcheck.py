@@ -6,7 +6,6 @@ from pathlib import Path
 
 from config import settings
 
-
 log = logging.getLogger(__name__)
 
 

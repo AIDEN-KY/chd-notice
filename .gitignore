@@ -6,6 +6,8 @@ notices.db-wal
 downloads/
 logs/
 __pycache__/
+.pytest-tmp/
+.pytest_cache/
 *.py[cod]
 .venv/
 pw-browsers/

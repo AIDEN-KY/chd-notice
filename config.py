@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-
 BASE_DIR = Path(__file__).resolve().parent
 
 
@@ -33,7 +32,9 @@ class Settings:
     attachment_dir: Path = BASE_DIR / "downloads"
     log_dir: Path = BASE_DIR / "logs"
     timezone: ZoneInfo = ZoneInfo("Asia/Shanghai")
-    pages_to_scrape: int = 3
+    # 动态翻页：连续遇到若干个全部已知的页面后停止，并设置最大页数兜底。
+    max_pages_to_scrape: int = 20
+    known_pages_to_stop: int = 3
     spa_wait_ms: int = 2_500
     action_timeout_ms: int = 20_000
     # 门户偶尔长时间不触发 DOMContentLoaded；导航只等待响应开始，再单独等 SPA 元素。

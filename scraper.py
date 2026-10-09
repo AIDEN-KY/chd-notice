@@ -2,21 +2,86 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
+from bs4 import BeautifulSoup
 from playwright.async_api import BrowserContext, ElementHandle, Page, async_playwright
 
 from config import settings
-from db import notice_exists, upsert_notice
+from db import get_notice_hash, save_notice
 
 log = logging.getLogger(__name__)
 
 
 class SessionExpiredError(RuntimeError):
     pass
+
+
+@dataclass
+class ScrapeStats:
+    new: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    baselined: int = 0
+    pages: int = 0
+
+    @property
+    def changed(self) -> int:
+        return self.new + self.updated
+
+
+def evaluate_pagination_page(
+    urls: tuple[str, ...],
+    seen_pages: set[tuple[str, ...]],
+    consecutive_known_pages: int,
+    page_all_known: bool,
+    known_pages_to_stop: int,
+) -> tuple[str | None, int]:
+    """返回停止原因，并更新连续已知页计数。"""
+    if urls in seen_pages:
+        return "repeated", consecutive_known_pages
+    seen_pages.add(urls)
+    consecutive = consecutive_known_pages + 1 if page_all_known else 0
+    if consecutive >= known_pages_to_stop:
+        return "known-pages", consecutive
+    return None, consecutive
+
+
+def notice_content_hash(notice: dict) -> str:
+    """对用户可见文本和附件元数据生成稳定哈希，忽略 HTML 样式变化。"""
+    content_text = BeautifulSoup(
+        notice.get("content_html", ""), "html.parser"
+    ).get_text(" ")
+
+    def normalized(value: object) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    attachments = sorted(
+        (
+            {
+                "name": normalized(item.get("name")),
+                "url": normalized(item.get("url")),
+            }
+            for item in notice.get("attachments", [])
+        ),
+        key=lambda item: (item["url"], item["name"]),
+    )
+    payload = {
+        "title": normalized(notice.get("title")),
+        "publish_time": normalized(notice.get("publish_time")),
+        "department": normalized(notice.get("department")),
+        "content": normalized(content_text),
+        "attachments": attachments,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 async def _goto_with_retry(page: Page, url: str) -> None:
@@ -106,7 +171,9 @@ async def _scrape_detail(context: BrowserContext, url: str) -> tuple[str, list[d
         if await _is_login_page(page):
             raise SessionExpiredError("会话已过期，请重新手动登录")
         content_selector = await _matching_selector(page, settings.detail_content_selectors)
-        content_html = await page.locator(content_selector).first.inner_html() if content_selector else ""
+        if not content_selector:
+            raise RuntimeError(f"详情页未找到正文区域：{url}")
+        content_html = await page.locator(content_selector).first.inner_html()
         seen: set[str] = set()
         attachments: list[dict] = []
         for selector in settings.attachment_selectors:
@@ -119,7 +186,9 @@ async def _scrape_detail(context: BrowserContext, url: str) -> tuple[str, list[d
                     continue
                 seen.add(absolute)
                 name = (await link.inner_text()).strip() or Path(urlparse(absolute).path).name
-                attachments.append(await _download_attachment(context, absolute, name))
+                attachments.append(
+                    {"name": name, "url": absolute, "path": "", "size": 0}
+                )
         return content_html, attachments
     finally:
         await page.close()
@@ -168,32 +237,66 @@ async def _extract_list_page(page: Page) -> list[dict]:
 
 
 async def _go_next(page: Page, page_number: int) -> bool:
-    # 优先点击明确页码，适配常见 jQuery/Element UI 分页器。
-    candidates = [
+    # 优先点击明确页码，最后再使用“文本恰好等于页码”的通用候选。
+    selectors = [
         f".pagination a:text-is('{page_number}')",
         f".el-pager li:text-is('{page_number}')",
+        f".bh-pagination li:text-is('{page_number}')",
+        f".bh-pager li:text-is('{page_number}')",
         f"[class*='page'] a:text-is('{page_number}')",
     ]
-    for selector in [*candidates, *settings.next_page_selectors]:
-        locator = page.locator(selector).first
-        if await locator.count() and await locator.is_visible():
-            old = await page.locator("body").inner_text()
+    candidates = [page.locator(selector).first for selector in selectors]
+    candidates.append(
+        page.locator("a, button, li, span")
+        .filter(has_text=re.compile(rf"^\s*{page_number}\s*$"))
+        .first
+    )
+    candidates.extend(page.locator(selector).first for selector in settings.next_page_selectors)
+
+    list_selector = await _matching_selector(page, settings.list_item_selectors)
+    if not list_selector:
+        return False
+    old_items = await page.locator(list_selector).all_inner_texts()
+    attempted = 0
+    for locator in candidates:
+        if not await locator.count() or not await locator.is_visible():
+            continue
+        attempted += 1
+        try:
             await locator.click()
-            try:
-                await page.wait_for_function(
-                    "oldText => document.body.innerText !== oldText", old,
-                    timeout=settings.action_timeout_ms,
-                )
-            except Exception:
-                await page.wait_for_timeout(settings.spa_wait_ms)
+            await page.wait_for_timeout(settings.spa_wait_ms)
+        except Exception as exc:
+            log.warning("分页候选点击失败：%s", exc)
+            continue
+        new_items = await page.locator(list_selector).all_inner_texts()
+        if new_items != old_items:
+            log.info("已进入列表第 %d 页", page_number)
             return True
+
+    page_number_nodes = page.locator("a, button, li, span").filter(
+        has_text=re.compile(rf"^\s*{page_number}\s*$")
+    )
+    diagnostics = []
+    for index in range(min(await page_number_nodes.count(), 5)):
+        node = page_number_nodes.nth(index)
+        diagnostics.append(
+            await node.evaluate(
+                "el => ({tag: el.tagName, className: el.className, "
+                "title: el.getAttribute('title'), aria: el.getAttribute('aria-label')})"
+            )
+        )
+    log.warning(
+        "翻页失败：尝试 %d 个可见候选；页码节点诊断=%s",
+        attempted,
+        diagnostics,
+    )
     return False
 
 
-async def scrape_notices(headless: bool = True) -> int:
+async def scrape_notices(headless: bool = True) -> ScrapeStats:
     if not settings.auth_file.exists():
         raise SessionExpiredError("未找到 auth.json，请先运行 python main.py init-auth")
-    added = 0
+    stats = ScrapeStats()
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=headless)
         context = await browser.new_context(storage_state=settings.auth_file)
@@ -212,33 +315,83 @@ async def scrape_notices(headless: bool = True) -> int:
                 raise SessionExpiredError("会话已过期，请重新手动登录")
             log.info("通知列表已加载：%s", page.url)
             seen: set[str] = set()
-            for page_number in range(1, settings.pages_to_scrape + 1):
-                log.info("开始处理列表第 %d/%d 页", page_number, settings.pages_to_scrape)
+            page_fingerprints: set[tuple[str, ...]] = set()
+            consecutive_known_pages = 0
+            for page_number in range(1, settings.max_pages_to_scrape + 1):
+                stats.pages = page_number
+                log.info(
+                    "开始处理列表第 %d 页（安全上限 %d 页）",
+                    page_number,
+                    settings.max_pages_to_scrape,
+                )
                 summaries = await _extract_list_page(page)
+                fingerprint = tuple(item["detail_url"] for item in summaries)
+                old_hashes = {
+                    item["detail_url"]: get_notice_hash(item["detail_url"])
+                    for item in summaries
+                }
+                page_all_known = all(value is not None for value in old_hashes.values())
+                stop_reason, consecutive_known_pages = evaluate_pagination_page(
+                    fingerprint,
+                    page_fingerprints,
+                    consecutive_known_pages,
+                    page_all_known,
+                    settings.known_pages_to_stop,
+                )
+                if stop_reason == "repeated":
+                    log.warning("分页后列表内容重复，为避免循环已停止抓取")
+                    break
                 for index, notice in enumerate(summaries, start=1):
                     if notice["detail_url"] in seen:
                         continue
                     seen.add(notice["detail_url"])
-                    if notice_exists(notice["detail_url"]):
-                        log.info("已入库，跳过详情与附件：%s", notice["title"])
-                        continue
+                    old_hash = old_hashes[notice["detail_url"]]
                     log.info(
-                        "正在抓取第 %d 页详情 %d/%d：%s",
+                        "正在检查第 %d 页详情 %d/%d：%s",
                         page_number, index, len(summaries), notice["title"],
                     )
                     content, attachments = await _scrape_detail(context, notice["detail_url"])
                     notice.update(content_html=content, attachments=attachments)
-                    if upsert_notice(notice):
-                        added += 1
+                    content_hash = notice_content_hash(notice)
+                    if old_hash == content_hash:
+                        stats.unchanged += 1
+                        log.info("内容未变化：%s", notice["title"])
+                        continue
+
+                    notice["attachments"] = [
+                        await _download_attachment(context, item["url"], item["name"])
+                        for item in attachments
+                    ]
+                    status = save_notice(notice, content_hash)
+                    if status == "new":
+                        stats.new += 1
                         log.info("新增通知：%s", notice["title"])
-                if page_number < settings.pages_to_scrape and not await _go_next(page, page_number + 1):
+                    elif status == "updated":
+                        stats.updated += 1
+                        log.info("通知内容有更新，已重新加入待发队列：%s", notice["title"])
+                    elif status == "baseline":
+                        stats.baselined += 1
+                        log.info("已为旧通知建立内容哈希基线：%s", notice["title"])
+                    else:
+                        stats.unchanged += 1
+
+                if stop_reason == "known-pages":
+                    log.info(
+                        "已连续处理 %d 个全部已知页面，安全停止翻页",
+                        consecutive_known_pages,
+                    )
+                    break
+                if (
+                    page_number < settings.max_pages_to_scrape
+                    and not await _go_next(page, page_number + 1)
+                ):
                     log.warning("无法进入第 %d 页，提前结束", page_number + 1)
                     break
             await context.storage_state(path=settings.auth_file)
         finally:
             await context.close()
             await browser.close()
-    return added
+    return stats
 
 
 async def initialize_auth() -> None:

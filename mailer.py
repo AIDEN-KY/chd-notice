@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import mimetypes
 import smtplib
+from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import quote
@@ -112,13 +113,21 @@ def _render_html(notices: list[dict], attach_files: bool, date_text: str) -> str
     )
 
 
-def send_digest(notices: list[dict], date_text: str) -> None:
+def _send_message(message: EmailMessage) -> None:
+    with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=30) as smtp:
+        smtp.login(settings.qq_email, settings.qq_smtp_auth_code)
+        smtp.send_message(message)
+
+
+def send_digest(notices: list[dict], date_text: str, message_id: str) -> None:
     files, total = _attachment_candidates(notices)
     attach_files = total <= settings.max_attachment_bytes
     message = EmailMessage()
     message["From"] = settings.qq_email
     message["To"] = settings.my_email
     message["Subject"] = f"#【学校通知】—【{date_text}】学校通知日报（共 {len(notices)} 条）"
+    message["Message-ID"] = message_id
+    message["Auto-Submitted"] = "auto-generated"
     unsubscribe_url = _get_unsubscribe_url()
     message["List-Unsubscribe"] = f"<{unsubscribe_url}>"
     plain_sections = []
@@ -149,6 +158,26 @@ def send_digest(notices: list[dict], date_text: str) -> None:
                 filename=safe_name,
             )
 
-    with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=30) as smtp:
-        smtp.login(settings.qq_email, settings.qq_smtp_auth_code)
-        smtp.send_message(message)
+    _send_message(message)
+
+
+def send_system_alert(title: str, detail: str) -> None:
+    """发送独立故障告警；调用方必须捕获 SMTP 自身失败。"""
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    message = EmailMessage()
+    message["From"] = settings.qq_email
+    message["To"] = settings.my_email
+    message["Subject"] = f"【长安大学通知系统故障】{title}"
+    message["Auto-Submitted"] = "auto-generated"
+    message.set_content(f"发生时间：{now}\n\n{detail}")
+    message.add_alternative(
+        "<!doctype html><html><body style='font-family:Segoe UI,Microsoft YaHei,Arial'>"
+        "<h2 style='color:#b91c1c'>长安大学通知系统故障</h2>"
+        f"<p><strong>{html.escape(title)}</strong></p>"
+        f"<p style='color:#64748b'>发生时间：{html.escape(now)}</p>"
+        f"<pre style='white-space:pre-wrap;background:#f8fafc;padding:12px'>"
+        f"{html.escape(detail)}</pre>"
+        "</body></html>",
+        subtype="html",
+    )
+    _send_message(message)
