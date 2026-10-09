@@ -286,13 +286,18 @@ async def _extract_list_page(page: Page) -> list[dict]:
 
 
 async def _go_next(page: Page, page_number: int) -> bool:
-    # 优先点击明确页码，最后再使用“文本恰好等于页码”的通用候选。
+    # 优先点击明确页码/下一页，最后再尝试无限滚动或虚拟列表加载。
     selectors = [
         f".pagination a:text-is('{page_number}')",
         f".el-pager li:text-is('{page_number}')",
         f".bh-pagination li:text-is('{page_number}')",
         f".bh-pager li:text-is('{page_number}')",
         f"[class*='page'] a:text-is('{page_number}')",
+        "button:text-is('下一页')",
+        "a:text-is('下一页')",
+        "li:text-is('下一页')",
+        "[aria-label*='next' i]",
+        "[aria-label*='下一页']",
     ]
     candidates = [page.locator(selector).first for selector in selectors]
     candidates.append(
@@ -321,6 +326,47 @@ async def _go_next(page: Page, page_number: int) -> bool:
         if new_items != old_items:
             log.info("已进入列表第 %d 页", page_number)
             return True
+
+    # 部分 SPA 不显示分页按钮，而是在窗口或列表祖先容器滚到底时加载下一批。
+    scroll_result = await page.locator(list_selector).first.evaluate(
+        """
+        (firstItem) => {
+          const targets = [];
+          let current = firstItem.parentElement;
+          while (current) {
+            if (current.scrollHeight > current.clientHeight + 10) targets.push(current);
+            current = current.parentElement;
+          }
+          const scrollingElement = document.scrollingElement;
+          if (scrollingElement && !targets.includes(scrollingElement)) {
+            targets.push(scrollingElement);
+          }
+          for (const target of targets) target.scrollTop = target.scrollHeight;
+          window.scrollTo(0, document.body.scrollHeight);
+          return targets.map((target) => ({
+            tag: target.tagName,
+            id: target.id || '',
+            className: typeof target.className === 'string' ? target.className : '',
+          }));
+        }
+        """
+    )
+    try:
+        await page.wait_for_function(
+            """
+            ({selector, oldItems}) => {
+              const current = [...document.querySelectorAll(selector)]
+                .map((item) => item.innerText);
+              return JSON.stringify(current) !== JSON.stringify(oldItems);
+            }
+            """,
+            {"selector": list_selector, "oldItems": old_items},
+            timeout=settings.action_timeout_ms,
+        )
+        log.info("滚动加载了列表第 %d 批", page_number)
+        return True
+    except Exception:
+        log.info("滚动后列表未变化：%s", scroll_result)
 
     page_number_nodes = page.locator("a, button, li, span").filter(
         has_text=re.compile(rf"^\s*{page_number}\s*$")
@@ -474,14 +520,13 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
             log.info("正在打开通知列表")
             await _goto_with_retry(page, settings.notices_url)
             await page.wait_for_timeout(settings.spa_wait_ms)
-            try:
-
-                await page.locator("#readClass").first.wait_for(timeout=15000)
-            except Exception:
-                pass
-
             if await _is_login_page(page):
                 raise SessionExpiredError("会话已过期，请重新手动登录")
+            list_selector = await _wait_for_list(page, timeout_ms=45_000)
+            if not list_selector:
+                raise RuntimeError(
+                    "SPA 在 45 秒内未渲染通知列表；请检查网络或列表选择器"
+                )
             log.info("通知列表已加载：%s", page.url)
             seen: set[str] = set()
             page_fingerprints: set[tuple[str, ...]] = set()
