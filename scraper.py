@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
-from playwright.async_api import BrowserContext, ElementHandle, Page, async_playwright
+from playwright.async_api import BrowserContext, Locator, Page, async_playwright
 
 from config import settings
 from db import get_notice_hash, save_notice
@@ -105,23 +105,13 @@ async def _goto_with_retry(page: Page, url: str) -> None:
             await page.wait_for_timeout(delay * 1000)
 
 
-async def _first_text(root: ElementHandle, selectors: list[str]) -> str:
+async def _first_text(root: Locator, selectors: list[str]) -> str:
     for selector in selectors:
-        node = await root.query_selector(selector)
-        if node:
+        node = root.locator(selector).first
+        if await node.count():
             text = (await node.inner_text()).strip()
             if text:
                 return re.sub(r"\s+", " ", text)
-    return ""
-
-
-async def _first_href(root: ElementHandle, selectors: list[str], base_url: str) -> str:
-    for selector in selectors:
-        node = await root.query_selector(selector)
-        if node:
-            href = await node.get_attribute("href")
-            if href and not href.lower().startswith(("javascript:", "#")):
-                return urljoin(base_url, href)
     return ""
 
 
@@ -271,9 +261,10 @@ async def _extract_list_page(page: Page) -> list[dict]:
         raise RuntimeError("未找到通知列表项，请按 README 调整 LIST_ITEM_SELECTORS")
 
     # 1) 先读取所有条目的静态信息（标题/时间/栏目）
-    items = await page.query_selector_all(selector)
+    items = page.locator(selector)
     raw: list[dict] = []
-    for item in items:
+    for index in range(await items.count()):
+        item = items.nth(index)
         title = await _first_text(item, settings.title_selectors)
         if not title:
             continue

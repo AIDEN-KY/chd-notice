@@ -169,6 +169,55 @@ def test_list_wait_uses_playwright_keyword_argument(monkeypatch) -> None:
     assert _run_immediate(scraper._wait_for_list(page, timeout_ms=1234)) == ".row"
 
 
+def test_list_item_is_relocated_by_exact_title_with_locators(monkeypatch) -> None:
+    class FakeTextNode:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        @property
+        def first(self) -> "FakeTextNode":
+            return self
+
+        async def count(self) -> int:
+            return 1
+
+        async def inner_text(self) -> str:
+            return self.text
+
+    class FakeRow:
+        def __init__(self, title: str) -> None:
+            self.title = title
+
+        def locator(self, selector: str) -> FakeTextNode:
+            assert selector == ".title"
+            return FakeTextNode(self.title)
+
+    class FakeRows:
+        def __init__(self, rows: list[FakeRow]) -> None:
+            self.rows = rows
+
+        async def count(self) -> int:
+            return len(self.rows)
+
+        def nth(self, index: int) -> FakeRow:
+            return self.rows[index]
+
+    class FakeTitlePage:
+        def __init__(self, rows: list[FakeRow]) -> None:
+            self.rows = FakeRows(rows)
+
+        def locator(self, selector: str) -> FakeRows:
+            assert selector == ".row"
+            return self.rows
+
+    rows = [FakeRow("第一条通知"), FakeRow("  目标   通知  ")]
+    page = FakeTitlePage(rows)
+    monkeypatch.setattr(scraper, "settings", SimpleNamespace(title_selectors=[".title"]))
+
+    matched = _run_immediate(scraper._list_item_by_title(page, ".row", "目标 通知"))
+    assert matched is rows[1]
+
+
 def test_dynamic_pagination_falls_back_to_infinite_scroll(monkeypatch) -> None:
     monkeypatch.setattr(scraper, "settings", _pagination_settings())
     page = _FakePage("scroll")
