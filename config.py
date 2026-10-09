@@ -52,26 +52,40 @@ class Settings:
     # 多个候选选择器用 || 分隔，可在 .env 中覆盖。
     list_item_selectors: list[str] = field(default_factory=lambda: _selectors(
         "LIST_ITEM_SELECTORS",
-        [".news-list li", ".notice-list li", ".bh-list li", ".list-group-item", "tbody tr"],
+        [
+            ".bh-border-color-gray-5.bh-bg-color-light",
+            ".news-list li",
+            ".notice-list li",
+            ".bh-list li",
+            ".list-group-item",
+            "tbody tr",
+        ],
     ))
     title_selectors: list[str] = field(default_factory=lambda: _selectors(
         "TITLE_SELECTORS",
-        [".title", ".news-title", ".notice-title", "td:nth-child(1)", "a"],
+        ["#readClass", ".title", ".news-title", ".notice-title", "td:nth-child(1)", "a"],
     ))
     time_selectors: list[str] = field(default_factory=lambda: _selectors(
         "TIME_SELECTORS",
-        [".time", ".date", ".publish-time", "td:nth-last-child(2)"],
+        [".time_class", ".time", ".date", ".publish-time", "td:nth-last-child(2)"],
     ))
     department_selectors: list[str] = field(default_factory=lambda: _selectors(
         "DEPARTMENT_SELECTORS",
-        [".department", ".dept", ".publisher", "td:nth-last-child(1)"],
+        [".lmmc_class", ".department", ".dept", ".publisher", "td:nth-last-child(1)"],
     ))
     detail_link_selectors: list[str] = field(default_factory=lambda: _selectors(
         "DETAIL_LINK_SELECTORS", ["a[href]"]
     ))
     detail_content_selectors: list[str] = field(default_factory=lambda: _selectors(
         "DETAIL_CONTENT_SELECTORS",
-        [".article-content", ".news-content", ".notice-content", ".bh-article-content", ".content"],
+        [
+            ".ggnrclass",
+            ".article-content",
+            ".news-content",
+            ".notice-content",
+            ".bh-article-content",
+            ".content",
+        ],
     ))
     attachment_selectors: list[str] = field(default_factory=lambda: _selectors(
         "ATTACHMENT_SELECTORS",
@@ -80,6 +94,9 @@ class Settings:
     next_page_selectors: list[str] = field(default_factory=lambda: _selectors(
         "NEXT_PAGE_SELECTORS",
         [".pagination .next:not(.disabled)", ".el-pagination .btn-next:not([disabled])", "a[title='下一页']"],
+    ))
+    scroll_container_selectors: list[str] = field(default_factory=lambda: _selectors(
+        "SCROLL_CONTAINER_SELECTORS", ["#app"]
     ))
 
     @property

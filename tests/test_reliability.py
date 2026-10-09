@@ -117,7 +117,8 @@ class _FakeLocator:
     async def all_inner_texts(self) -> list[str]:
         return list(self.page.items)
 
-    async def evaluate(self, _script: str) -> list[dict]:
+    async def evaluate(self, _script: str, _argument: object) -> list[dict]:
+        assert _argument == ["#app"]
         self.page.items = [*self.page.items, "loaded-by-scroll"]
         return [{"tag": "DIV", "id": "list", "className": "scrollable"}]
 
@@ -146,6 +147,7 @@ def _pagination_settings() -> SimpleNamespace:
         next_page_selectors=[".next"],
         spa_wait_ms=1,
         action_timeout_ms=1234,
+        scroll_container_selectors=["#app"],
     )
 
 

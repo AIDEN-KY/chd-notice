@@ -141,7 +141,8 @@ async def _wait_for_list(page: Page, timeout_ms: int = 30_000) -> str | None:
             timeout=timeout_ms,
         )
     except Exception:
-        return None
+        # 元素可能恰好在超时边界完成渲染，最后再同步检查一次，避免误报警。
+        return await _matching_selector(page, settings.list_item_selectors)
     return await _matching_selector(page, settings.list_item_selectors)
 
 
@@ -330,8 +331,13 @@ async def _go_next(page: Page, page_number: int) -> bool:
     # 部分 SPA 不显示分页按钮，而是在窗口或列表祖先容器滚到底时加载下一批。
     scroll_result = await page.locator(list_selector).first.evaluate(
         """
-        (firstItem) => {
+        (firstItem, configuredSelectors) => {
           const targets = [];
+          for (const selector of configuredSelectors) {
+            const target = document.querySelector(selector);
+            if (target && target.scrollHeight > target.clientHeight + 10 &&
+                !targets.includes(target)) targets.push(target);
+          }
           let current = firstItem.parentElement;
           while (current) {
             if (current.scrollHeight > current.clientHeight + 10) targets.push(current);
@@ -349,7 +355,8 @@ async def _go_next(page: Page, page_number: int) -> bool:
             className: typeof target.className === 'string' ? target.className : '',
           }));
         }
-        """
+        """,
+        settings.scroll_container_selectors,
     )
     try:
         await page.wait_for_function(
