@@ -226,6 +226,19 @@ def test_dynamic_pagination_falls_back_to_infinite_scroll(monkeypatch) -> None:
     assert page.items == ["first-page", "loaded-by-scroll"]
 
 
+def test_returning_from_detail_restores_loaded_list_batch(monkeypatch) -> None:
+    monkeypatch.setattr(scraper, "settings", _pagination_settings())
+    monkeypatch.setattr(
+        scraper.asyncio,
+        "get_running_loop",
+        lambda: SimpleNamespace(time=lambda: 0.0),
+    )
+    page = _FakePage("scroll")
+
+    assert _run_immediate(scraper._restore_list_count(page, ".row", 2)) is True
+    assert page.items == ["first-page", "loaded-by-scroll"]
+
+
 def test_notice_list_reenters_portal_when_spa_stays_blank(monkeypatch) -> None:
     test_settings = SimpleNamespace(
         retry_attempts=3,

@@ -173,6 +173,57 @@ async def _open_notice_list(page: Page) -> str:
     )
 
 
+async def _scroll_list_containers(page: Page, list_selector: str) -> list[dict]:
+    """滚动已配置容器及列表祖先，兼容门户的无限滚动/懒加载。"""
+    return await page.locator(list_selector).first.evaluate(
+        """
+        (firstItem, configuredSelectors) => {
+          const targets = [];
+          for (const selector of configuredSelectors) {
+            const target = document.querySelector(selector);
+            if (target && target.scrollHeight > target.clientHeight + 10 &&
+                !targets.includes(target)) targets.push(target);
+          }
+          let current = firstItem.parentElement;
+          while (current) {
+            if (current.scrollHeight > current.clientHeight + 10 &&
+                !targets.includes(current)) targets.push(current);
+            current = current.parentElement;
+          }
+          const scrollingElement = document.scrollingElement;
+          if (scrollingElement && !targets.includes(scrollingElement)) {
+            targets.push(scrollingElement);
+          }
+          for (const target of targets) target.scrollTop = target.scrollHeight;
+          window.scrollTo(0, document.body.scrollHeight);
+          return targets.map((target) => ({
+            tag: target.tagName,
+            id: target.id || '',
+            className: typeof target.className === 'string' ? target.className : '',
+          }));
+        }
+        """,
+        settings.scroll_container_selectors,
+    )
+
+
+async def _restore_list_count(
+    page: Page,
+    list_selector: str,
+    expected_count: int,
+) -> bool:
+    """从详情返回后恢复此前已加载的列表批次。"""
+    deadline = asyncio.get_running_loop().time() + settings.action_timeout_ms / 1000
+    while True:
+        current_count = await page.locator(list_selector).count()
+        if current_count >= expected_count:
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await _scroll_list_containers(page, list_selector)
+        await page.wait_for_timeout(min(settings.spa_wait_ms, 1_000))
+
+
 async def _first_page_text(page: Page, selectors: list[str]) -> str:
     for selector in selectors:
         locator = page.locator(selector).first
@@ -304,11 +355,17 @@ async def _extract_list_page(page: Page) -> list[dict]:
         info["detail_url"] = page.url
         result.append(info)
         await page.go_back()
-        # 等列表重新渲染出来
+        # 等列表重新渲染，并恢复此前已加载的完整批次；只等第一行会导致后续行缺失。
         try:
             await page.locator(selector).first.wait_for(timeout=settings.action_timeout_ms)
         except Exception:
             await page.wait_for_timeout(settings.spa_wait_ms)
+        if not await _restore_list_count(page, selector, len(raw)):
+            restored_count = await page.locator(selector).count()
+            raise RuntimeError(
+                f"返回列表后仅恢复 {restored_count}/{len(raw)} 条通知，"
+                "无法安全继续匹配详情"
+            )
 
     return result
 
@@ -357,35 +414,7 @@ async def _go_next(page: Page, page_number: int) -> bool:
             return True
 
     # 部分 SPA 不显示分页按钮，而是在窗口或列表祖先容器滚到底时加载下一批。
-    scroll_result = await page.locator(list_selector).first.evaluate(
-        """
-        (firstItem, configuredSelectors) => {
-          const targets = [];
-          for (const selector of configuredSelectors) {
-            const target = document.querySelector(selector);
-            if (target && target.scrollHeight > target.clientHeight + 10 &&
-                !targets.includes(target)) targets.push(target);
-          }
-          let current = firstItem.parentElement;
-          while (current) {
-            if (current.scrollHeight > current.clientHeight + 10) targets.push(current);
-            current = current.parentElement;
-          }
-          const scrollingElement = document.scrollingElement;
-          if (scrollingElement && !targets.includes(scrollingElement)) {
-            targets.push(scrollingElement);
-          }
-          for (const target of targets) target.scrollTop = target.scrollHeight;
-          window.scrollTo(0, document.body.scrollHeight);
-          return targets.map((target) => ({
-            tag: target.tagName,
-            id: target.id || '',
-            className: typeof target.className === 'string' ? target.className : '',
-          }));
-        }
-        """,
-        settings.scroll_container_selectors,
-    )
+    scroll_result = await _scroll_list_containers(page, list_selector)
     try:
         await page.wait_for_function(
             """
