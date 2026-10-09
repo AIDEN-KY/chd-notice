@@ -146,6 +146,43 @@ async def _wait_for_list(page: Page, timeout_ms: int = 30_000) -> str | None:
     return await _matching_selector(page, settings.list_item_selectors)
 
 
+async def _open_notice_list(page: Page) -> str:
+    """打开通知列表，并对“导航成功但 SPA 空白”的情况做有限重试。"""
+    for attempt in range(1, settings.retry_attempts + 1):
+        await _goto_with_retry(page, settings.notices_url)
+        await page.wait_for_timeout(settings.spa_wait_ms)
+        if await _is_login_page(page):
+            raise SessionExpiredError("会话已过期，请重新手动登录")
+
+        list_selector = await _wait_for_list(
+            page,
+            timeout_ms=settings.spa_load_timeout_ms,
+        )
+        if list_selector:
+            return list_selector
+        if attempt == settings.retry_attempts:
+            break
+
+        delay = settings.retry_backoff_seconds * attempt
+        log.warning(
+            "SPA 未渲染通知列表（第 %d/%d 次）；%d 秒后重新进入页面",
+            attempt,
+            settings.retry_attempts,
+            delay,
+        )
+        await page.goto(
+            "about:blank",
+            wait_until="commit",
+            timeout=settings.action_timeout_ms,
+        )
+        await page.wait_for_timeout(delay * 1000)
+
+    raise RuntimeError(
+        f"SPA 连续 {settings.retry_attempts} 次未渲染通知列表；"
+        "请检查网络、CAS 会话或列表选择器"
+    )
+
+
 async def _first_page_text(page: Page, selectors: list[str]) -> str:
     for selector in selectors:
         locator = page.locator(selector).first
@@ -574,15 +611,7 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
         page = await context.new_page()
         try:
             log.info("正在打开通知列表")
-            await _goto_with_retry(page, settings.notices_url)
-            await page.wait_for_timeout(settings.spa_wait_ms)
-            if await _is_login_page(page):
-                raise SessionExpiredError("会话已过期，请重新手动登录")
-            list_selector = await _wait_for_list(page, timeout_ms=45_000)
-            if not list_selector:
-                raise RuntimeError(
-                    "SPA 在 45 秒内未渲染通知列表；请检查网络或列表选择器"
-                )
+            await _open_notice_list(page)
             log.info("通知列表已加载：%s", page.url)
             seen: set[str] = set()
             page_fingerprints: set[tuple[str, ...]] = set()

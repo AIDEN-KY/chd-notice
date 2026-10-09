@@ -165,3 +165,47 @@ def test_dynamic_pagination_falls_back_to_infinite_scroll(monkeypatch) -> None:
 
     assert _run_immediate(scraper._go_next(page, 2)) is True
     assert page.items == ["first-page", "loaded-by-scroll"]
+
+
+def test_notice_list_reenters_portal_when_spa_stays_blank(monkeypatch) -> None:
+    test_settings = SimpleNamespace(
+        retry_attempts=3,
+        retry_backoff_seconds=1,
+        notices_url="https://example.test/notices",
+        spa_wait_ms=1,
+        spa_load_timeout_ms=2,
+        action_timeout_ms=3,
+    )
+    attempts = []
+
+    class FakeOpenPage:
+        def __init__(self) -> None:
+            self.blank_navigations = 0
+
+        async def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        async def goto(self, url: str, **_kwargs: object) -> None:
+            assert url == "about:blank"
+            self.blank_navigations += 1
+
+    async def fake_goto_with_retry(_page: object, url: str) -> None:
+        assert url == test_settings.notices_url
+
+    async def fake_is_login_page(_page: object) -> bool:
+        return False
+
+    async def fake_wait_for_list(_page: object, timeout_ms: int) -> str | None:
+        assert timeout_ms == test_settings.spa_load_timeout_ms
+        attempts.append(True)
+        return ".row" if len(attempts) == 2 else None
+
+    monkeypatch.setattr(scraper, "settings", test_settings)
+    monkeypatch.setattr(scraper, "_goto_with_retry", fake_goto_with_retry)
+    monkeypatch.setattr(scraper, "_is_login_page", fake_is_login_page)
+    monkeypatch.setattr(scraper, "_wait_for_list", fake_wait_for_list)
+    page = FakeOpenPage()
+
+    assert _run_immediate(scraper._open_notice_list(page)) == ".row"
+    assert len(attempts) == 2
+    assert page.blank_navigations == 1

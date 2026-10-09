@@ -36,6 +36,7 @@ class Settings:
     max_pages_to_scrape: int = 20
     known_pages_to_stop: int = 3
     spa_wait_ms: int = 2_500
+    spa_load_timeout_ms: int = 30_000
     action_timeout_ms: int = 20_000
     # 门户偶尔长时间不触发 DOMContentLoaded；导航只等待响应开始，再单独等 SPA 元素。
     navigation_timeout_ms: int = 60_000
