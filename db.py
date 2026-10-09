@@ -74,6 +74,16 @@ def upsert_notice(notice: dict) -> bool:
         return cursor.rowcount == 1
 
 
+def notice_exists(detail_url: str) -> bool:
+    """判断详情 URL 是否已入库，避免重复打开详情页和下载附件。"""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM notices WHERE detail_url = ? LIMIT 1",
+            (detail_url,),
+        ).fetchone()
+    return row is not None
+
+
 def get_unsent_for_date(date_text: str) -> list[dict]:
     with connect() as conn:
         rows = conn.execute(

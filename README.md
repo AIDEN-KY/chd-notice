@@ -8,6 +8,8 @@
 - 详情 URL 是唯一键，重复抓取不会重复入库。
 - 附件可下载且总原始大小不超过 20 MiB 时全部随信附上；总大小超过阈值时不附文件，正文列出所有附件链接。下载失败的附件也保留原链接。
 - 抓取失败不会阻塞已有数据发送；摘要失败自动使用标题。
+- 门户导航和 DeepSeek 临时故障最多重试 3 次；SMTP 不盲目重试，避免邮件实际送达后因响应丢失而重复投递。
+- 已入库的详情 URL 会跳过正文与附件重复抓取；日志写入 `logs/chd-notice.log`，按天轮转并保留 30 天。
 - 选择器是站点最容易变化的部分，全部集中在 `config.py`，也能通过 `.env` 覆盖。
 
 ## 安装
@@ -40,6 +42,9 @@ python main.py init-auth
 ## 运行与测试
 
 ```powershell
+# 只检查本地配置，不联网、不抓取、不发邮件
+python main.py doctor
+
 # 只抓取一次
 python main.py scrape
 
@@ -50,7 +55,7 @@ python main.py send-now
 python main.py scheduler
 ```
 
-生产环境可使用 Windows 任务计划程序或 NSSM 保持 `python main.py scheduler` 常驻。系统本身没有每 30 分钟抓取任务。
+生产环境推荐让 Windows 任务计划程序每天 21:00 执行项目内的 `run_daily.bat`；无需让终端常驻。也可使用 `python main.py scheduler` 前台运行。系统本身没有每 30 分钟抓取任务。
 
 ## 首次联调选择器
 

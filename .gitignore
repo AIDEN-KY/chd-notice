@@ -4,6 +4,7 @@ notices.db
 notices.db-shm
 notices.db-wal
 downloads/
+logs/
 __pycache__/
 *.py[cod]
 .venv/

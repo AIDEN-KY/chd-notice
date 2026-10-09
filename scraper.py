@@ -10,13 +10,34 @@ from urllib.parse import unquote, urljoin, urlparse
 from playwright.async_api import BrowserContext, ElementHandle, Page, async_playwright
 
 from config import settings
-from db import upsert_notice
+from db import notice_exists, upsert_notice
 
 log = logging.getLogger(__name__)
 
 
 class SessionExpiredError(RuntimeError):
     pass
+
+
+async def _goto_with_retry(page: Page, url: str) -> None:
+    """门户偶发超时；仅对幂等的页面导航做有限重试。"""
+    for attempt in range(1, settings.retry_attempts + 1):
+        try:
+            await page.goto(
+                url,
+                wait_until="commit",
+                timeout=settings.navigation_timeout_ms,
+            )
+            return
+        except Exception as exc:
+            if attempt == settings.retry_attempts:
+                raise
+            delay = settings.retry_backoff_seconds * attempt
+            log.warning(
+                "页面打开失败（第 %d/%d 次）：%s；%d 秒后重试",
+                attempt, settings.retry_attempts, exc, delay,
+            )
+            await page.wait_for_timeout(delay * 1000)
 
 
 async def _first_text(root: ElementHandle, selectors: list[str]) -> str:
@@ -80,7 +101,7 @@ async def _download_attachment(context: BrowserContext, url: str, name: str) -> 
 async def _scrape_detail(context: BrowserContext, url: str) -> tuple[str, list[dict]]:
     page = await context.new_page()
     try:
-        await page.goto(url, wait_until="commit", timeout=settings.navigation_timeout_ms)
+        await _goto_with_retry(page, url)
         await page.wait_for_timeout(settings.spa_wait_ms)
         if await _is_login_page(page):
             raise SessionExpiredError("会话已过期，请重新手动登录")
@@ -179,11 +200,7 @@ async def scrape_notices(headless: bool = True) -> int:
         page = await context.new_page()
         try:
             log.info("正在打开通知列表")
-            await page.goto(
-                settings.notices_url,
-                wait_until="commit",
-                timeout=settings.navigation_timeout_ms,
-            )
+            await _goto_with_retry(page, settings.notices_url)
             await page.wait_for_timeout(settings.spa_wait_ms)
             try:
 
@@ -202,6 +219,9 @@ async def scrape_notices(headless: bool = True) -> int:
                     if notice["detail_url"] in seen:
                         continue
                     seen.add(notice["detail_url"])
+                    if notice_exists(notice["detail_url"]):
+                        log.info("已入库，跳过详情与附件：%s", notice["title"])
+                        continue
                     log.info(
                         "正在抓取第 %d 页详情 %d/%d：%s",
                         page_number, index, len(summaries), notice["title"],
@@ -226,11 +246,7 @@ async def initialize_auth() -> None:
         browser = await pw.chromium.launch(headless=False)
         context = await browser.new_context()
         page = await context.new_page()
-        await page.goto(
-            settings.notices_url,
-            wait_until="commit",
-            timeout=settings.navigation_timeout_ms,
-        )
+        await _goto_with_retry(page, settings.notices_url)
         print("请在打开的浏览器中完成 CAS 登录，并确认已进入通知页面。")
         await asyncio.to_thread(input, "完成后回到终端按 Enter 保存会话：")
         if await _is_login_page(page):

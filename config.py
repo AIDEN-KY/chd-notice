@@ -31,12 +31,15 @@ class Settings:
     auth_file: Path = BASE_DIR / "auth.json"
     database_file: Path = BASE_DIR / "notices.db"
     attachment_dir: Path = BASE_DIR / "downloads"
+    log_dir: Path = BASE_DIR / "logs"
     timezone: ZoneInfo = ZoneInfo("Asia/Shanghai")
     pages_to_scrape: int = 3
     spa_wait_ms: int = 2_500
     action_timeout_ms: int = 20_000
     # 门户偶尔长时间不触发 DOMContentLoaded；导航只等待响应开始，再单独等 SPA 元素。
     navigation_timeout_ms: int = 60_000
+    retry_attempts: int = 3
+    retry_backoff_seconds: int = 3
     max_attachment_bytes: int = 20 * 1024 * 1024
     schedule_hour: int = 21
     schedule_minute: int = 0
