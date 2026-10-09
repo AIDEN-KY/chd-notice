@@ -405,9 +405,9 @@ async def _collect_pagination_diagnostics(page: Page) -> dict:
     )
     await page.wait_for_timeout(settings.spa_wait_ms)
     after_count = await page.locator(list_selector).count() if list_selector else 0
-    return await page.evaluate(
+    diagnostics = await page.evaluate(
         """
-        ({beforeCount, afterCount}) => {
+        ({beforeCount, afterCount, configuredListSelectors, matchedListSelector}) => {
           const visible = (el) => {
             const style = getComputedStyle(el);
             const rect = el.getBoundingClientRect();
@@ -444,18 +444,68 @@ async def _collect_pagination_diagnostics(page: Page) -> dict:
               clientHeight: el.clientHeight,
               scrollHeight: el.scrollHeight,
             }));
+          const repeated = new Map();
+          for (const el of document.querySelectorAll('*')) {
+            if (!visible(el)) continue;
+            const className = typeof el.className === 'string'
+              ? el.className.trim().replace(/\\s+/g, '.') : '';
+            if (!className) continue;
+            const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+            if (text.length < 4 || text.length > 400) continue;
+            const signature = `${el.tagName.toLowerCase()}.${className}`;
+            const group = repeated.get(signature) || {
+              selector: signature,
+              count: 0,
+              samples: [],
+              html: el.outerHTML.slice(0, 500),
+            };
+            group.count += 1;
+            if (group.samples.length < 3) group.samples.push(text.slice(0, 160));
+            repeated.set(signature, group);
+          }
+          const likelyRows = [...repeated.values()]
+            .filter((group) => group.count >= 3)
+            .sort((left, right) => right.count - left.count)
+            .slice(0, 30);
           return {
             beforeCount,
             afterCount,
+            configuredListSelectors,
+            matchedListSelector,
             url: location.href,
             bodyTextEnd: (document.body.innerText || '').slice(-1000),
             candidates,
             scrollables,
+            likelyRows,
           };
         }
         """,
-        {"beforeCount": before_count, "afterCount": after_count},
+        {
+            "beforeCount": before_count,
+            "afterCount": after_count,
+            "configuredListSelectors": settings.list_item_selectors,
+            "matchedListSelector": list_selector,
+        },
     )
+    frames = []
+    for index, frame in enumerate(page.frames):
+        try:
+            frame_info = await frame.evaluate(
+                """
+                (selectors) => ({
+                  title: document.title || '',
+                  bodyTextStart: (document.body?.innerText || '').slice(0, 500),
+                  selectorCounts: Object.fromEntries(selectors.map((selector) =>
+                    [selector, document.querySelectorAll(selector).length])),
+                })
+                """,
+                settings.list_item_selectors,
+            )
+        except Exception as exc:
+            frame_info = {"error": str(exc)}
+        frames.append({"index": index, "url": frame.url, **frame_info})
+    diagnostics["frames"] = frames
+    return diagnostics
 
 
 async def diagnose_pagination(
@@ -498,9 +548,8 @@ async def diagnose_pagination(
                 timeout_ms=10_000 if wait_for_user else 45_000,
             )
             if not list_selector:
-                raise RuntimeError(
-                    "未检测到通知列表；请确认浏览器中确实显示列表，"
-                    "并检查 LIST_ITEM_SELECTORS 配置"
+                log.warning(
+                    "配置的列表选择器未匹配；将采集页面候选结构用于修复选择器"
                 )
             return await _collect_pagination_diagnostics(page)
         finally:
