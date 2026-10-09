@@ -137,7 +137,7 @@ async def _wait_for_list(page: Page, timeout_ms: int = 30_000) -> str | None:
     try:
         await page.wait_for_function(
             "selectors => selectors.some(selector => document.querySelector(selector))",
-            settings.list_item_selectors,
+            arg=settings.list_item_selectors,
             timeout=timeout_ms,
         )
     except Exception:
@@ -297,7 +297,7 @@ async def _extract_list_page(page: Page) -> list[dict]:
         try:
             await page.wait_for_function(
                 "url => window.location.href !== url",
-                list_url,
+                arg=list_url,
                 timeout=settings.action_timeout_ms,
             )
         except Exception:
@@ -404,7 +404,7 @@ async def _go_next(page: Page, page_number: int) -> bool:
               return JSON.stringify(current) !== JSON.stringify(oldItems);
             }
             """,
-            {"selector": list_selector, "oldItems": old_items},
+            arg={"selector": list_selector, "oldItems": old_items},
             timeout=settings.action_timeout_ms,
         )
         log.info("滚动加载了列表第 %d 批", page_number)

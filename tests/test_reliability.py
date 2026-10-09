@@ -135,9 +135,12 @@ class _FakePage:
         return None
 
     async def wait_for_function(
-        self, _script: str, _argument: object, timeout: int
+        self, _script: str, *, arg: object, timeout: int
     ) -> None:
         assert timeout == 1234
+        if arg == [".row"]:
+            return
+        assert arg == {"selector": ".row", "oldItems": ["first-page"]}
         assert self.items != ["first-page"]
 
 
@@ -157,6 +160,13 @@ def test_dynamic_pagination_clicks_next_control(monkeypatch) -> None:
 
     assert _run_immediate(scraper._go_next(page, 2)) is True
     assert page.items == ["second-page"]
+
+
+def test_list_wait_uses_playwright_keyword_argument(monkeypatch) -> None:
+    monkeypatch.setattr(scraper, "settings", _pagination_settings())
+    page = _FakePage("scroll")
+
+    assert _run_immediate(scraper._wait_for_list(page, timeout_ms=1234)) == ".row"
 
 
 def test_dynamic_pagination_falls_back_to_infinite_scroll(monkeypatch) -> None:
