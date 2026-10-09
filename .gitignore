@@ -1,0 +1,14 @@
+.env
+auth.json
+notices.db
+notices.db-shm
+notices.db-wal
+downloads/
+__pycache__/
+*.py[cod]
+.venv/
+pw-browsers/
+*.db
+
+# 本地联调工具，不属于生产版本
+diagnose.py

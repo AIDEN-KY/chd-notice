@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+
+from apscheduler.schedulers.blocking import BlockingScheduler
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from config import settings  # noqa: E402
+from db import init_db  # noqa: E402
+from scraper import initialize_auth, scrape_notices  # noqa: E402
+from service import run_daily, send_pending_today  # noqa: E402
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+
+
+def run_scheduler() -> None:
+    scheduler = BlockingScheduler(timezone=settings.timezone)
+    scheduler.add_job(
+        lambda: asyncio.run(run_daily()),
+        trigger="cron",
+        hour=settings.schedule_hour,
+        minute=settings.schedule_minute,
+        id="daily_notice_digest",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+    logging.getLogger(__name__).info("调度器已启动，每天 21:00 执行")
+    scheduler.start()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="长安大学通知监控与每日邮件推送系统")
+    parser.add_argument(
+        "command", choices=["init-auth", "scrape", "send-now", "send-pending", "scheduler"],
+        help="初始化登录 / 立即抓取 / 完整日报 / 仅发送今日待发通知 / 启动定时器",
+    )
+    args = parser.parse_args()
+    configure_logging()
+    init_db()
+    if args.command == "init-auth":
+        asyncio.run(initialize_auth())
+    elif args.command == "scrape":
+        count = asyncio.run(scrape_notices())
+        print(f"抓取完成，新增 {count} 条")
+    elif args.command == "send-now":
+        asyncio.run(run_daily())
+    elif args.command == "send-pending":
+        asyncio.run(send_pending_today())
+    else:
+        run_scheduler()
+
+
+if __name__ == "__main__":
+    main()
