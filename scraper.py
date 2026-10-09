@@ -132,6 +132,19 @@ async def _matching_selector(page: Page, selectors: list[str]) -> str | None:
     return None
 
 
+async def _wait_for_list(page: Page, timeout_ms: int = 30_000) -> str | None:
+    """等待 SPA 至少渲染出一种配置中的列表选择器。"""
+    try:
+        await page.wait_for_function(
+            "selectors => selectors.some(selector => document.querySelector(selector))",
+            settings.list_item_selectors,
+            timeout=timeout_ms,
+        )
+    except Exception:
+        return None
+    return await _matching_selector(page, settings.list_item_selectors)
+
+
 async def _first_page_text(page: Page, selectors: list[str]) -> str:
     for selector in selectors:
         locator = page.locator(selector).first
@@ -332,9 +345,23 @@ async def _go_next(page: Page, page_number: int) -> bool:
 async def _collect_pagination_diagnostics(page: Page) -> dict:
     list_selector = await _matching_selector(page, settings.list_item_selectors)
     before_count = await page.locator(list_selector).count() if list_selector else 0
+    await page.evaluate(
+        """
+        () => {
+          window.scrollTo(0, document.body.scrollHeight);
+          for (const el of document.querySelectorAll('*')) {
+            if (el.scrollHeight > el.clientHeight + 10) {
+              el.scrollTop = el.scrollHeight;
+            }
+          }
+        }
+        """
+    )
+    await page.wait_for_timeout(settings.spa_wait_ms)
+    after_count = await page.locator(list_selector).count() if list_selector else 0
     return await page.evaluate(
         """
-        ({beforeCount}) => {
+        ({beforeCount, afterCount}) => {
           const visible = (el) => {
             const style = getComputedStyle(el);
             const rect = el.getBoundingClientRect();
@@ -373,6 +400,7 @@ async def _collect_pagination_diagnostics(page: Page) -> dict:
             }));
           return {
             beforeCount,
+            afterCount,
             url: location.href,
             bodyTextEnd: (document.body.innerText || '').slice(-1000),
             candidates,
@@ -380,7 +408,7 @@ async def _collect_pagination_diagnostics(page: Page) -> dict:
           };
         }
         """,
-        {"beforeCount": before_count},
+        {"beforeCount": before_count, "afterCount": after_count},
     )
 
 
@@ -397,6 +425,9 @@ async def diagnose_pagination(headless: bool = True) -> dict:
             await page.wait_for_timeout(settings.spa_wait_ms)
             if await _is_login_page(page):
                 raise SessionExpiredError("会话已过期，请重新手动登录")
+            list_selector = await _wait_for_list(page, timeout_ms=45_000)
+            if not list_selector:
+                raise RuntimeError("SPA 在 45 秒内未渲染通知列表，无法诊断分页")
             return await _collect_pagination_diagnostics(page)
         finally:
             await context.close()
