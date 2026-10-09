@@ -132,6 +132,26 @@ async def _matching_selector(page: Page, selectors: list[str]) -> str | None:
     return None
 
 
+async def _first_page_text(page: Page, selectors: list[str]) -> str:
+    for selector in selectors:
+        locator = page.locator(selector).first
+        if await locator.count():
+            text = re.sub(r"\s+", " ", (await locator.inner_text()).strip())
+            if text:
+                return text
+    return ""
+
+
+async def _list_item_by_title(page: Page, item_selector: str, title: str):
+    """SPA 返回列表后可能重新排序，因此每次点击前都按标题重新定位。"""
+    items = page.locator(item_selector)
+    for index in range(await items.count()):
+        item = items.nth(index)
+        if await _first_text(item, settings.title_selectors) == title:
+            return item
+    raise RuntimeError(f"列表重新渲染后未找到通知：{title}")
+
+
 async def _is_login_page(page: Page) -> bool:
     parsed = urlparse(page.url)
     if parsed.netloc == "ids.chd.edu.cn" or "/authserver/login" in parsed.path:
@@ -219,18 +239,34 @@ async def _extract_list_page(page: Page) -> list[dict]:
     result: list[dict] = []
     for i, info in enumerate(raw):
         log.info("正在解析详情链接 %d/%d：%s", i + 1, len(raw), info["title"])
-        target = page.locator(selector).nth(i)
+        target = await _list_item_by_title(page, selector, info["title"])
         await target.scroll_into_view_if_needed()
+        list_url = page.url
         await target.click()
-        await page.wait_for_timeout(2000)
+        try:
+            await page.wait_for_function(
+                "url => window.location.href !== url",
+                list_url,
+                timeout=settings.action_timeout_ms,
+            )
+        except Exception:
+            await page.wait_for_timeout(settings.spa_wait_ms)
+        if page.url == list_url:
+            raise RuntimeError(f"点击通知后详情 URL 未变化：{info['title']}")
+        await page.wait_for_timeout(settings.spa_wait_ms)
+        detail_title = await _first_page_text(page, settings.title_selectors)
+        if detail_title and detail_title != info["title"]:
+            raise RuntimeError(
+                f"详情标题校验失败：期望“{info['title']}”，实际“{detail_title}”"
+            )
         info["detail_url"] = page.url
         result.append(info)
         await page.go_back()
         # 等列表重新渲染出来
         try:
-            await page.locator("#readClass").first.wait_for(timeout=10000)
+            await page.locator(selector).first.wait_for(timeout=settings.action_timeout_ms)
         except Exception:
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(settings.spa_wait_ms)
 
     return result
 
@@ -291,6 +327,80 @@ async def _go_next(page: Page, page_number: int) -> bool:
         diagnostics,
     )
     return False
+
+
+async def _collect_pagination_diagnostics(page: Page) -> dict:
+    list_selector = await _matching_selector(page, settings.list_item_selectors)
+    before_count = await page.locator(list_selector).count() if list_selector else 0
+    return await page.evaluate(
+        """
+        ({beforeCount}) => {
+          const visible = (el) => {
+            const style = getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+              rect.width > 0 && rect.height > 0;
+          };
+          const pattern = /(page|pager|pagination|next|more|load|下一|更多|加载)/i;
+          const candidates = [...document.querySelectorAll('*')]
+            .filter((el) => {
+              const text = (el.innerText || '').trim();
+              const identity = [el.id, el.className, el.getAttribute('title'),
+                el.getAttribute('aria-label')].filter(Boolean).join(' ');
+              return visible(el) && (pattern.test(identity) ||
+                (text.length <= 30 && pattern.test(text)) || /^\\d+$/.test(text));
+            })
+            .slice(0, 40)
+            .map((el) => ({
+              tag: el.tagName,
+              id: el.id || '',
+              className: typeof el.className === 'string' ? el.className : '',
+              text: (el.innerText || '').trim().slice(0, 80),
+              title: el.getAttribute('title') || '',
+              aria: el.getAttribute('aria-label') || '',
+              html: el.outerHTML.slice(0, 500),
+            }));
+          const scrollables = [...document.querySelectorAll('*')]
+            .filter((el) => visible(el) && el.clientHeight > 100 &&
+              el.scrollHeight > el.clientHeight + 10)
+            .slice(0, 20)
+            .map((el) => ({
+              tag: el.tagName,
+              id: el.id || '',
+              className: typeof el.className === 'string' ? el.className : '',
+              clientHeight: el.clientHeight,
+              scrollHeight: el.scrollHeight,
+            }));
+          return {
+            beforeCount,
+            url: location.href,
+            bodyTextEnd: (document.body.innerText || '').slice(-1000),
+            candidates,
+            scrollables,
+          };
+        }
+        """,
+        {"beforeCount": before_count},
+    )
+
+
+async def diagnose_pagination(headless: bool = True) -> dict:
+    """快速收集分页/滚动容器信息，不点击通知、不写数据库、不发邮件。"""
+    if not settings.auth_file.exists():
+        raise SessionExpiredError("未找到 auth.json，请先运行 python main.py init-auth")
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=headless)
+        context = await browser.new_context(storage_state=settings.auth_file)
+        page = await context.new_page()
+        try:
+            await _goto_with_retry(page, settings.notices_url)
+            await page.wait_for_timeout(settings.spa_wait_ms)
+            if await _is_login_page(page):
+                raise SessionExpiredError("会话已过期，请重新手动登录")
+            return await _collect_pagination_diagnostics(page)
+        finally:
+            await context.close()
+            await browser.close()
 
 
 async def scrape_notices(headless: bool = True) -> ScrapeStats:

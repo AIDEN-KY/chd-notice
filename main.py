@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 from logging.handlers import TimedRotatingFileHandler
 
@@ -13,7 +14,7 @@ load_dotenv()
 from config import settings  # noqa: E402
 from db import init_db  # noqa: E402
 from healthcheck import run_healthcheck  # noqa: E402
-from scraper import initialize_auth, scrape_notices  # noqa: E402
+from scraper import diagnose_pagination, initialize_auth, scrape_notices  # noqa: E402
 from service import run_daily, send_pending_today  # noqa: E402
 from version import VERSION  # noqa: E402
 
@@ -61,7 +62,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="长安大学通知监控与每日邮件推送系统")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument(
-        "command", choices=["doctor", "init-auth", "scrape", "send-now", "send-pending", "scheduler"],
+        "command",
+        choices=[
+            "doctor",
+            "diagnose-pagination",
+            "init-auth",
+            "scrape",
+            "send-now",
+            "send-pending",
+            "scheduler",
+        ],
         help="配置检查 / 初始化登录 / 立即抓取 / 完整日报 / 仅发送今日待发通知 / 启动定时器",
     )
     args = parser.parse_args()
@@ -71,6 +81,8 @@ def main() -> None:
         raise SystemExit(0 if run_healthcheck() else 1)
     if args.command == "init-auth":
         asyncio.run(initialize_auth())
+    elif args.command == "diagnose-pagination":
+        print(json.dumps(asyncio.run(diagnose_pagination()), ensure_ascii=False, indent=2))
     elif args.command == "scrape":
         stats = asyncio.run(scrape_notices())
         print(
