@@ -9,6 +9,7 @@ from scraper import (
     _notice_candidates,
     evaluate_pagination_page,
     notice_content_hash,
+    parse_api_notices,
 )
 from service import delivery_identity
 from version import VERSION
@@ -66,6 +67,30 @@ def test_api_diagnostics_extract_notice_objects_without_full_payload() -> None:
             "fields": {"DM": "abc123", "BT": "测试通知", "LMMC": "测试部门"},
         }
     ]
+
+
+def test_api_list_preserves_ids_and_full_department_and_old_urls() -> None:
+    old_url = "https://portal.chd.edu.cn/index.do#/show?dm=stable-id&lm=旧栏目"
+    payload = {"code": "0", "data": [
+        {"GGDM": "stable-id", "GGBT": "通知 标题", "FBSJ": "2026-10-10 18:00:01",
+         "FBBM": "信息与网络管理处（数字校园建设中心）", "LMMC": "信息与网"},
+        {"GGDM": "new-id", "GGBT": "新通知", "LMMC": "图书馆"},
+    ]}
+    notices = parse_api_notices(payload, {"stable-id": old_url})
+    assert notices[0]["detail_url"] == old_url
+    assert notices[0]["department"] == "信息与网络管理处（数字校园建设中心）"
+    assert notices[0]["publish_time"] == "2026-10-10 18:00:01"
+    assert "dm=new-id" in notices[1]["detail_url"]
+
+
+def test_api_list_rejects_errors_instead_of_claiming_end_of_list() -> None:
+    import pytest
+
+    with pytest.raises(RuntimeError, match="格式异常"):
+        parse_api_notices({"code": "401", "msg": "expired"}, {})
+    with pytest.raises(RuntimeError, match="GGDM"):
+        parse_api_notices({"data": [{"GGBT": "缺少标识"}]}, {})
+    assert parse_api_notices({"data": []}, {}) == []
 
 
 def test_delivery_identity_changes_with_notice_revision() -> None:

@@ -41,6 +41,13 @@ def test_historical_unsent_notice_is_still_selected(tmp_path, monkeypatch) -> No
     assert pending[0]["fetched_date"] == "2020-01-01"
 
 
+def test_existing_portal_url_is_found_by_stable_dm(tmp_path, monkeypatch) -> None:
+    _use_temp_database(tmp_path, monkeypatch)
+    old_url = "https://portal.chd.edu.cn/index.do#/show?dm=ABC123&lm=旧部门"
+    db.save_notice(_notice(url=old_url), "hash-v1")
+    assert db.get_existing_notice_urls() == {"ABC123": old_url}
+
+
 def test_delivery_attempts_errors_and_completion_are_recorded(tmp_path, monkeypatch) -> None:
     _use_temp_database(tmp_path, monkeypatch)
     db.save_notice(_notice(), "hash-v1")

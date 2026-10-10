@@ -27,6 +27,11 @@ class Settings:
         "https://portal.chd.edu.cn/qljfwapp/sys/lwPsTzggApp/"
         "*default/index.do#/tzgg"
     )
+    list_api_url: str = (
+        "https://portal.chd.edu.cn/qljfwapp/sys/lwPsTzggApp/"
+        "bulletinController/getGGInfo.do"
+    )
+    list_page_size: int = 12
     auth_file: Path = BASE_DIR / "auth.json"
     database_file: Path = BASE_DIR / "notices.db"
     attachment_dir: Path = BASE_DIR / "downloads"

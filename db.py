@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator, Literal
+from urllib.parse import parse_qs, urlparse
 
 from config import settings
 
@@ -101,6 +102,19 @@ def get_notice_hash(detail_url: str) -> str | None:
             (detail_url,),
         ).fetchone()
     return None if row is None else str(row["content_hash"])
+
+
+def get_existing_notice_urls() -> dict[str, str]:
+    """按门户稳定 ID 找回原 URL，兼容旧版截断的 lm 参数。"""
+    with connect() as conn:
+        rows = conn.execute("SELECT detail_url FROM notices ORDER BY id").fetchall()
+    urls = {}
+    for row in rows:
+        fragment = urlparse(row["detail_url"]).fragment
+        identifier = parse_qs(fragment.partition("?")[2]).get("dm", [""])[0]
+        if identifier:
+            urls.setdefault(identifier, row["detail_url"])
+    return urls
 
 
 def save_notice(notice: dict, content_hash: str) -> NoticeSaveStatus:

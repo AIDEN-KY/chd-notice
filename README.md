@@ -84,7 +84,8 @@ NEXT_PAGE_SELECTORS=button.actual-next
 
 - QQ SMTP 与 SQLite 不支持共同事务：邮件成功投递后、数据库标记前若进程崩溃，下次仍可能重复发送。v1.1.0 会保存稳定 Message-ID、投递状态和尝试次数以便追踪，但普通 SMTP 无法提供严格的“仅投递一次”保证。
 - `auth.json` 含登录会话凭据，必须像密码一样保护。过期时程序打印“会话已过期，请重新手动登录”，重新执行 `init-auth` 即可。
-- 长安大学列表项是 JavaScript 可点击的 `<div>`；当前实现会逐条点击并记录稳定的 hash 路由 URL。门户 DOM 或路由规则改变后仍需更新选择器或点击逻辑。
+- 长安大学列表通过登录会话中的 Playwright APIRequestContext 调用 `getGGInfo.do`，以 `PAGENUM/PAGESIZE` 动态分页。由 `GGDM` 构造详情 hash 路由，避免点击列表改变已读排序。详情仍用浏览器提取；接口或 DOM 改版时需调整集中配置。
+- 已有通知按详情 URL 中的 `dm` 复用原记录，兼容旧版截断的栏目参数。完整部门及发布时间补全可能使旧记录哈希变化，重新进入待发队列。
 
 ## 开发检查
 

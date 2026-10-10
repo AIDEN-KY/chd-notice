@@ -7,13 +7,13 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import BrowserContext, Locator, Page, Response, async_playwright
 
 from config import settings
-from db import get_notice_hash, save_notice
+from db import get_existing_notice_urls, get_notice_hash, save_notice
 
 log = logging.getLogger(__name__)
 
@@ -755,6 +755,63 @@ async def diagnose_list_api() -> list[dict]:
             await browser.close()
 
 
+def parse_api_notices(payload: object, existing_urls: dict[str, str]) -> list[dict]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise RuntimeError("通知列表接口返回格式异常，不能将其视为列表结束")
+    result = []
+    seen_ids = set()
+    for row in payload["data"]:
+        if not isinstance(row, dict) or not row.get("GGDM") or not row.get("GGBT"):
+            raise RuntimeError("通知列表接口缺少 GGDM 或 GGBT")
+        identifier = str(row["GGDM"])
+        if identifier in seen_ids:
+            continue
+        seen_ids.add(identifier)
+        title = re.sub(r"\s+", " ", str(row["GGBT"])).strip()
+        detail_url = existing_urls.get(identifier) or (
+            settings.notices_url.partition("#")[0]
+            + "#/show?"
+            + urlencode({"dm": identifier, "lm": str(row.get("LMMC") or "")})
+        )
+        result.append({
+            "title": title,
+            "publish_time": str(row.get("FBSJ") or ""),
+            "department": str(row.get("FBBM") or row.get("LMMC") or ""),
+            "detail_url": detail_url,
+        })
+    return result
+
+
+async def _fetch_api_list(
+    context: BrowserContext, page_number: int, existing_urls: dict[str, str]
+) -> list[dict]:
+    for attempt in range(1, settings.retry_attempts + 1):
+        try:
+            response = await context.request.post(
+                settings.list_api_url,
+                form={"data": json.dumps({
+                    "PAGENUM": page_number,
+                    "PAGESIZE": settings.list_page_size,
+                })},
+                headers={"Referer": settings.notices_url},
+                timeout=settings.action_timeout_ms,
+            )
+            if "ids.chd.edu.cn" in response.url or response.status in {401, 403}:
+                raise SessionExpiredError("会话已过期，请重新手动登录")
+            if not response.ok:
+                raise RuntimeError(f"通知列表接口 HTTP {response.status}")
+            return parse_api_notices(await response.json(), existing_urls)
+        except SessionExpiredError:
+            raise
+        except Exception as exc:
+            if attempt == settings.retry_attempts:
+                raise
+            log.warning("列表接口第 %d 页请求失败（%d/%d）：%s",
+                        page_number, attempt, settings.retry_attempts, exc)
+            await asyncio.sleep(settings.retry_backoff_seconds * attempt)
+    raise RuntimeError("列表接口重试结束")
+
+
 async def scrape_notices(headless: bool = True) -> ScrapeStats:
     if not settings.auth_file.exists():
         raise SessionExpiredError("未找到 auth.json，请先运行 python main.py init-auth")
@@ -769,6 +826,7 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
             log.info("通知列表已加载：%s", page.url)
             seen: set[str] = set()
             page_fingerprints: set[tuple[str, ...]] = set()
+            existing_urls = get_existing_notice_urls()
             consecutive_known_pages = 0
             for page_number in range(1, settings.max_pages_to_scrape + 1):
                 stats.pages = page_number
@@ -777,7 +835,10 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
                     page_number,
                     settings.max_pages_to_scrape,
                 )
-                summaries = await _extract_list_page(page)
+                summaries = await _fetch_api_list(context, page_number, existing_urls)
+                if not summaries:
+                    log.info("列表接口第 %d 页为空，已到列表末尾", page_number)
+                    break
                 fingerprint = tuple(item["detail_url"] for item in summaries)
                 old_hashes = {
                     item["detail_url"]: get_notice_hash(item["detail_url"])
@@ -834,11 +895,8 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
                         consecutive_known_pages,
                     )
                     break
-                if (
-                    page_number < settings.max_pages_to_scrape
-                    and not await _go_next(page, page_number + 1)
-                ):
-                    log.warning("无法进入第 %d 页，提前结束", page_number + 1)
+                if len(summaries) < settings.list_page_size:
+                    log.info("当前页不足 %d 条，已到列表末尾", settings.list_page_size)
                     break
             await context.storage_state(path=settings.auth_file)
         finally:
