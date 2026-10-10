@@ -78,7 +78,7 @@ def main() -> None:
             "send-pending",
             "scheduler",
         ],
-        help="配置检查 / 初始化登录 / 立即抓取 / 完整日报 / 仅发送今日待发通知 / 启动定时器",
+        help="配置检查 / 初始化登录 / 立即抓取 / 完整日报 / 仅发送全部待发通知 / 启动定时器",
     )
     args = parser.parse_args()
     configure_logging()

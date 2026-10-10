@@ -353,6 +353,18 @@ async def _scrape_detail(context: BrowserContext, url: str) -> tuple[str, list[d
         content_selector = await _matching_selector(page, settings.detail_content_selectors)
         if not content_selector:
             raise RuntimeError(f"详情页未找到正文区域：{url}")
+        # SPA 可能先创建空容器，再异步填入正文或附件，不能把空壳存成新版本。
+        await page.wait_for_function(
+            """selectors => {
+                const body = document.querySelector(selectors.content);
+                return Boolean(body && body.innerHTML.trim()) ||
+                    selectors.attachments.some(selector =>
+                        [...document.querySelectorAll(selector)].some(link =>
+                            link.getAttribute('href')));
+            }""",
+            arg={"content": content_selector, "attachments": settings.attachment_selectors},
+            timeout=settings.action_timeout_ms,
+        )
         content_html = await page.locator(content_selector).first.inner_html()
         seen: set[str] = set()
         attachments: list[dict] = []
@@ -898,6 +910,11 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
                 if len(summaries) < settings.list_page_size:
                     log.info("当前页不足 %d 条，已到列表末尾", settings.list_page_size)
                     break
+            else:
+                log.warning(
+                    "已达到 %d 页安全上限，本次抓取停止；不代表已遍历全部历史通知",
+                    settings.max_pages_to_scrape,
+                )
             await context.storage_state(path=settings.auth_file)
         finally:
             await context.close()
