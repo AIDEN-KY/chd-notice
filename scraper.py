@@ -248,13 +248,33 @@ async def _first_page_text(page: Page, selectors: list[str]) -> str:
 
 
 async def _list_item_by_title(page: Page, item_selector: str, title: str):
-    """SPA 返回列表后可能重新排序，因此每次点击前都按标题重新定位。"""
-    items = page.locator(item_selector)
-    for index in range(await items.count()):
-        item = items.nth(index)
-        if await _row_title(item) == title:
-            return item
-    raise RuntimeError(f"列表重新渲染后未找到通知：{title}")
+    """按标题跨滚动批次重定位，兼容已读后重新排序。"""
+    seen_fingerprints: set[tuple[str, ...]] = set()
+    last_titles: list[str] = []
+    for _ in range(settings.max_pages_to_scrape):
+        items = page.locator(item_selector)
+        current_titles = []
+        for index in range(await items.count()):
+            item = items.nth(index)
+            item_title = await _row_title(item)
+            current_titles.append(item_title)
+            if item_title == title:
+                return item
+
+        fingerprint = tuple(current_titles)
+        if fingerprint in seen_fingerprints:
+            break
+        seen_fingerprints.add(fingerprint)
+        last_titles = current_titles
+        if not current_titles:
+            break
+        await _scroll_list_containers(page, item_selector)
+        await page.wait_for_timeout(settings.spa_wait_ms)
+
+    preview = "、".join(item for item in last_titles[:3] if item)
+    raise RuntimeError(
+        f"滚动搜索后仍未找到通知：{title}；当前批次示例：{preview or '空'}"
+    )
 
 
 async def _is_login_page(page: Page) -> bool:

@@ -212,10 +212,92 @@ def test_list_item_is_relocated_by_exact_title_with_locators(monkeypatch) -> Non
 
     rows = [FakeRow("第一条通知"), FakeRow("  目标   通知  ")]
     page = FakeTitlePage(rows)
-    monkeypatch.setattr(scraper, "settings", SimpleNamespace(title_selectors=[".title"]))
+    monkeypatch.setattr(
+        scraper,
+        "settings",
+        SimpleNamespace(
+            title_selectors=[".title"],
+            max_pages_to_scrape=3,
+            scroll_container_selectors=["#app"],
+            spa_wait_ms=1,
+        ),
+    )
 
     matched = _run_immediate(scraper._list_item_by_title(page, ".row", "目标 通知"))
     assert matched is rows[1]
+
+
+def test_list_item_searches_later_scroll_batches(monkeypatch) -> None:
+    class TextNode:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        @property
+        def first(self) -> "TextNode":
+            return self
+
+        async def count(self) -> int:
+            return 1
+
+        async def inner_text(self) -> str:
+            return self.text
+
+    class LazyRow:
+        def __init__(self, owner: "LazyPage", title: str) -> None:
+            self.owner = owner
+            self.title = title
+
+        def locator(self, selector: str) -> TextNode:
+            assert selector == ".title"
+            return TextNode(self.title)
+
+        async def evaluate(self, _script: str, argument: object) -> list[dict]:
+            assert argument == ["#app"]
+            if len(self.owner.rows) == 1:
+                self.owner.rows.append(LazyRow(self.owner, "滚动后目标"))
+            return [{"tag": "DIV", "id": "app", "className": ""}]
+
+    class LazyRows:
+        def __init__(self, owner: "LazyPage") -> None:
+            self.owner = owner
+
+        @property
+        def first(self) -> LazyRow:
+            return self.owner.rows[0]
+
+        async def count(self) -> int:
+            return len(self.owner.rows)
+
+        def nth(self, index: int) -> LazyRow:
+            return self.owner.rows[index]
+
+    class LazyPage:
+        def __init__(self) -> None:
+            self.rows = [LazyRow(self, "首批通知")]
+
+        def locator(self, selector: str) -> LazyRows:
+            assert selector == ".row"
+            return LazyRows(self)
+
+        async def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    monkeypatch.setattr(
+        scraper,
+        "settings",
+        SimpleNamespace(
+            title_selectors=[".title"],
+            max_pages_to_scrape=3,
+            scroll_container_selectors=["#app"],
+            spa_wait_ms=1,
+        ),
+    )
+    page = LazyPage()
+
+    matched = _run_immediate(
+        scraper._list_item_by_title(page, ".row", "滚动后目标")
+    )
+    assert matched.title == "滚动后目标"
 
 
 def test_row_title_falls_back_to_first_line_when_read_marker_changes(monkeypatch) -> None:
