@@ -10,7 +10,16 @@ from pathlib import Path
 from urllib.parse import unquote, urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
-from playwright.async_api import BrowserContext, Locator, Page, Response, async_playwright
+from playwright.async_api import (
+    BrowserContext,
+    Locator,
+    Page,
+    Response,
+    async_playwright,
+)
+from playwright.async_api import (
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from config import settings
 from db import get_existing_notice_urls, get_notice_hash, save_notice
@@ -350,6 +359,18 @@ async def _scrape_detail(context: BrowserContext, url: str) -> tuple[str, list[d
         await page.wait_for_timeout(settings.spa_wait_ms)
         if await _is_login_page(page):
             raise SessionExpiredError("会话已过期，请重新手动登录")
+        try:
+            await page.wait_for_function(
+                "selectors => selectors.some(selector => document.querySelector(selector))",
+                arg=settings.detail_content_selectors,
+                timeout=settings.spa_load_timeout_ms,
+            )
+        except PlaywrightTimeoutError as exc:
+            if await _is_login_page(page):
+                raise SessionExpiredError("会话已过期，请重新手动登录") from exc
+            raise RuntimeError(
+                f"详情页正文区域在 {settings.spa_load_timeout_ms / 1000:g} 秒内未渲染：{url}"
+            ) from exc
         content_selector = await _matching_selector(page, settings.detail_content_selectors)
         if not content_selector:
             raise RuntimeError(f"详情页未找到正文区域：{url}")

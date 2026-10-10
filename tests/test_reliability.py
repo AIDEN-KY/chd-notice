@@ -19,7 +19,7 @@ from version import VERSION
 T = TypeVar("T")
 
 
-@pytest.mark.parametrize("load_fails", [False, True])
+@pytest.mark.parametrize("load_fails", [False, True, "container"])
 def test_detail_waits_for_population_and_closes_page(monkeypatch, load_fails) -> None:
     class DetailNode:
         @property
@@ -32,6 +32,7 @@ def test_detail_waits_for_population_and_closes_page(monkeypatch, load_fails) ->
 
     class DetailPage:
         populated = False
+        container_ready = False
         closed = False
         url = "https://example.test/detail"
 
@@ -39,6 +40,12 @@ def test_detail_waits_for_population_and_closes_page(monkeypatch, load_fails) ->
             pass
 
         async def wait_for_function(self, _script, *, arg, timeout):
+            if arg == [".body"]:
+                assert timeout == 5678
+                if load_fails == "container":
+                    raise scraper.PlaywrightTimeoutError("容器未渲染")
+                self.container_ready = True
+                return
             assert arg == {"content": ".body", "attachments": []}
             assert timeout == 1234
             if load_fails:
@@ -63,17 +70,21 @@ def test_detail_waits_for_population_and_closes_page(monkeypatch, load_fails) ->
         return False
 
     async def selector(*_args):
+        assert page.container_ready
         return ".body"
 
     monkeypatch.setattr(scraper, "_goto_with_retry", goto)
     monkeypatch.setattr(scraper, "_is_login_page", is_login)
     monkeypatch.setattr(scraper, "_matching_selector", selector)
     monkeypatch.setattr(scraper, "settings", SimpleNamespace(
-        spa_wait_ms=1, action_timeout_ms=1234,
+        spa_wait_ms=1, action_timeout_ms=1234, spa_load_timeout_ms=5678,
         detail_content_selectors=[".body"], attachment_selectors=[],
     ))
     context = SimpleNamespace(new_page=new_page)
-    if load_fails:
+    if load_fails == "container":
+        with pytest.raises(RuntimeError, match="正文区域在 5.678 秒内未渲染"):
+            _run_immediate(scraper._scrape_detail(context, page.url))
+    elif load_fails:
         with pytest.raises(TimeoutError, match="正文未加载"):
             _run_immediate(scraper._scrape_detail(context, page.url))
     else:
