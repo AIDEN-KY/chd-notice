@@ -218,6 +218,32 @@ def test_list_item_is_relocated_by_exact_title_with_locators(monkeypatch) -> Non
     assert matched is rows[1]
 
 
+def test_row_title_falls_back_to_first_line_when_read_marker_changes(monkeypatch) -> None:
+    class MissingNode:
+        @property
+        def first(self) -> "MissingNode":
+            return self
+
+        async def count(self) -> int:
+            return 0
+
+    class ReadRow:
+        def locator(self, selector: str) -> MissingNode:
+            assert selector == "#readClass"
+            return MissingNode()
+
+        async def inner_text(self) -> str:
+            return "  已读通知标题  \n某部门 | · 2026-10-10"
+
+    monkeypatch.setattr(
+        scraper,
+        "settings",
+        SimpleNamespace(title_selectors=["#readClass"]),
+    )
+
+    assert _run_immediate(scraper._row_title(ReadRow())) == "已读通知标题"
+
+
 def test_dynamic_pagination_falls_back_to_infinite_scroll(monkeypatch) -> None:
     monkeypatch.setattr(scraper, "settings", _pagination_settings())
     page = _FakePage("scroll")

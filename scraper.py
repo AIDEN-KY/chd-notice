@@ -115,6 +115,19 @@ async def _first_text(root: Locator, selectors: list[str]) -> str:
     return ""
 
 
+async def _row_title(root: Locator) -> str:
+    """提取列表标题；已读状态导致标题标记变化时退回行文本首行。"""
+    title = await _first_text(root, settings.title_selectors)
+    if title:
+        return title
+    row_text = await root.inner_text()
+    for line in row_text.splitlines():
+        normalized = re.sub(r"\s+", " ", line).strip()
+        if normalized:
+            return normalized
+    return ""
+
+
 async def _matching_selector(page: Page, selectors: list[str]) -> str | None:
     for selector in selectors:
         if await page.locator(selector).count():
@@ -239,7 +252,7 @@ async def _list_item_by_title(page: Page, item_selector: str, title: str):
     items = page.locator(item_selector)
     for index in range(await items.count()):
         item = items.nth(index)
-        if await _first_text(item, settings.title_selectors) == title:
+        if await _row_title(item) == title:
             return item
     raise RuntimeError(f"列表重新渲染后未找到通知：{title}")
 
@@ -316,7 +329,7 @@ async def _extract_list_page(page: Page) -> list[dict]:
     raw: list[dict] = []
     for index in range(await items.count()):
         item = items.nth(index)
-        title = await _first_text(item, settings.title_selectors)
+        title = await _row_title(item)
         if not title:
             continue
         raw.append({
