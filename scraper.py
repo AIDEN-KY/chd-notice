@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urljoin, urlparse
@@ -344,10 +346,25 @@ async def _download_attachment(context: BrowserContext, url: str, name: str) -> 
         ) == login_url.path.rstrip("/"):
             raise SessionExpiredError("附件请求返回登录页，会话可能已过期")
         body = await response.body()
+        content_hash = hashlib.sha256(body).hexdigest()
         settings.attachment_dir.mkdir(parents=True, exist_ok=True)
-        target = settings.attachment_dir / _safe_filename(name, url)
-        target.write_bytes(body)
-        item.update(path=str(target.resolve()), size=len(body))
+        filename = Path(_safe_filename(name, url))
+        target = settings.attachment_dir / f"{filename.stem}_{content_hash}{filename.suffix}"
+        # 内容寻址保留旧版本；同目录临时文件确保替换不会跨文件系统。
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=settings.attachment_dir, prefix=".attachment-", suffix=".tmp", delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(body)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, target)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+        item.update(path=str(target.resolve()), size=len(body), sha256=content_hash)
     except Exception as exc:
         log.warning("附件下载失败，将仅保留链接：%s (%s)", url, exc)
     return item

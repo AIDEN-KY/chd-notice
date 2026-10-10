@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -182,3 +183,70 @@ def test_attachment_download_rejects_login_redirects(
         assert body_reads == [True]
         assert len(list(download_dir.iterdir())) == 1
         assert next(download_dir.iterdir()).read_bytes() == payload
+
+
+@pytest.mark.parametrize("fail_publish", [False, True], ids=["updated-content", "disk-failure"])
+def test_attachment_update_preserves_previous_file(tmp_path, monkeypatch, fail_publish):
+    """同 URL 更新不能覆盖旧版本；发布失败必须清理临时文件并降级为链接。"""
+    import os
+
+    original_url = "https://portal.chd.edu.cn/files/report.pdf"
+    payload = b"old attachment"
+    download_dir = tmp_path / "downloads"
+
+    class FakeResponse:
+        ok = True
+        url = original_url
+
+        async def body(self):
+            return payload
+
+    async def get(_url, **_kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        scraper,
+        "settings",
+        SimpleNamespace(
+            action_timeout_ms=1234,
+            attachment_dir=download_dir,
+            login_url="https://ids.chd.edu.cn/authserver/login",
+        ),
+    )
+    context = SimpleNamespace(request=SimpleNamespace(get=get))
+
+    def download():
+        coroutine = scraper._download_attachment(context, original_url, "report.pdf")
+        try:
+            coroutine.send(None)
+        except StopIteration as completed:
+            return completed.value
+        finally:
+            coroutine.close()
+        raise AssertionError("测试替身不应挂起协程")
+
+    first = download()
+    old_path = next(download_dir.iterdir())
+    payload = b"new attachment"
+    if fail_publish:
+
+        def fail_replace(*_args, **_kwargs):
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(os, "replace", fail_replace)
+
+    second = download()
+    assert old_path.read_bytes() == b"old attachment", "更新不能破坏已存通知的附件"
+    assert first["sha256"] == hashlib.sha256(b"old attachment").hexdigest()
+    if fail_publish:
+        assert second["path"] == ""
+        assert second["size"] == 0
+        assert second["url"] == original_url
+        assert list(download_dir.iterdir()) == [old_path]
+    else:
+        assert second["path"] != first["path"]
+        assert second["sha256"] == hashlib.sha256(payload).hexdigest()
+        assert len(list(download_dir.iterdir())) == 2
+        repeated = download()
+        assert repeated["path"] == second["path"]
+        assert len(list(download_dir.iterdir())) == 2
