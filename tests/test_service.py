@@ -102,6 +102,7 @@ def test_send_service_records_failure_and_keeps_notice_pending(tmp_path, monkeyp
         delivery = conn.execute("SELECT * FROM mail_deliveries").fetchone()
     assert delivery["status"] == "failed"
     assert delivery["attempts"] == 1
+    assert delivery["failure_count"] == 1
     assert "SMTP timeout" in delivery["last_error"]
 
 

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS mail_deliveries (
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -74,6 +75,13 @@ def init_db() -> None:
     """创建数据库，并原地升级 v1.0 数据库。"""
     with connect() as conn:
         conn.executescript(SCHEMA)
+        delivery_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(mail_deliveries)")
+        }
+        _add_column_if_missing(
+            conn, "mail_deliveries", delivery_columns,
+            "failure_count", "INTEGER NOT NULL DEFAULT 0",
+        )
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(notices)")}
         _add_column_if_missing(conn, "notices", columns, "fetched_date", "TEXT NOT NULL DEFAULT ''")
         _add_column_if_missing(conn, "notices", columns, "content_hash", "TEXT NOT NULL DEFAULT ''")
@@ -244,7 +252,8 @@ def fail_delivery(message_key: str, error: str) -> None:
         conn.execute(
             """
             UPDATE mail_deliveries
-            SET status = 'failed', last_error = ?, updated_at = ?
+            SET status = 'failed', failure_count = failure_count + 1,
+                last_error = ?, updated_at = ?
             WHERE message_key = ?
             """,
             (error[:4000], now_text, message_key),

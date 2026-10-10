@@ -61,6 +61,7 @@ def test_delivery_attempts_errors_and_completion_are_recorded(tmp_path, monkeypa
     assert failed is not None
     assert failed["status"] == "failed"
     assert failed["attempts"] == 1
+    assert failed["failure_count"] == 1
     assert failed["last_error"] == "SMTP timeout"
 
     assert db.start_delivery("key-1") == 2
@@ -69,7 +70,25 @@ def test_delivery_attempts_errors_and_completion_are_recorded(tmp_path, monkeypa
     assert completed is not None
     assert completed["status"] == "sent"
     assert completed["attempts"] == 2
+    assert completed["failure_count"] == 1
     assert db.get_unsent_notices() == []
+
+
+def test_delivery_failure_counter_migrates_without_losing_records(tmp_path, monkeypatch) -> None:
+    _use_temp_database(tmp_path, monkeypatch)
+    db.ensure_delivery("migration", "<migration@test>", [1])
+    with db.connect() as conn:
+        conn.execute("ALTER TABLE mail_deliveries DROP COLUMN failure_count")
+    db.init_db()
+    db.init_db()
+    assert db.get_delivery("migration")["failure_count"] == 0
+    db.start_delivery("migration")
+    db.fail_delivery("migration", "first failure")
+    db.start_delivery("migration")
+    db.fail_delivery("migration", "second failure")
+    delivery = db.get_delivery("migration")
+    assert delivery["failure_count"] == 2
+    assert delivery["last_error"] == "second failure"
 
 
 def test_content_update_requeues_a_sent_notice(tmp_path, monkeypatch) -> None:
