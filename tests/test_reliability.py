@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Coroutine, TypeVar
 
+import pytest
+
 import scraper
 from scraper import (
     ScrapeStats,
@@ -15,6 +17,70 @@ from service import delivery_identity
 from version import VERSION
 
 T = TypeVar("T")
+
+
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_detail_waits_for_population_and_closes_page(monkeypatch, load_fails) -> None:
+    class DetailNode:
+        @property
+        def first(self):
+            return self
+
+        async def inner_html(self):
+            assert page.populated
+            return "<p>完整正文</p>"
+
+    class DetailPage:
+        populated = False
+        closed = False
+        url = "https://example.test/detail"
+
+        async def wait_for_timeout(self, _timeout):
+            pass
+
+        async def wait_for_function(self, _script, *, arg, timeout):
+            assert arg == {"content": ".body", "attachments": []}
+            assert timeout == 1234
+            if load_fails:
+                raise TimeoutError("正文未加载")
+            self.populated = True
+
+        def locator(self, _selector):
+            return DetailNode()
+
+        async def close(self):
+            self.closed = True
+
+    page = DetailPage()
+
+    async def new_page():
+        return page
+
+    async def goto(*_args):
+        pass
+
+    async def is_login(*_args):
+        return False
+
+    async def selector(*_args):
+        return ".body"
+
+    monkeypatch.setattr(scraper, "_goto_with_retry", goto)
+    monkeypatch.setattr(scraper, "_is_login_page", is_login)
+    monkeypatch.setattr(scraper, "_matching_selector", selector)
+    monkeypatch.setattr(scraper, "settings", SimpleNamespace(
+        spa_wait_ms=1, action_timeout_ms=1234,
+        detail_content_selectors=[".body"], attachment_selectors=[],
+    ))
+    context = SimpleNamespace(new_page=new_page)
+    if load_fails:
+        with pytest.raises(TimeoutError, match="正文未加载"):
+            _run_immediate(scraper._scrape_detail(context, page.url))
+    else:
+        assert _run_immediate(scraper._scrape_detail(context, page.url)) == (
+            "<p>完整正文</p>", [],
+        )
+    assert page.closed
 
 
 def _run_immediate(coroutine: Coroutine[object, object, T]) -> T:
