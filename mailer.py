@@ -63,11 +63,15 @@ def _render_html(notices: list[dict], attach_files: bool, date_text: str) -> str
                     "<span style='color:#64748b'>（未能取得下载链接）</span></li>"
                 )
         attachment_html = (
-            "<div style='margin-top:12px;font-size:14px;color:#475569'>"
-            f"<strong>附件（{len(attachments)}）</strong>"
-            f"<ul style='margin:6px 0 0;padding-left:20px'>{''.join(attachment_rows)}</ul>"
-            "</div>"
-        ) if attachment_rows else ""
+            (
+                "<div style='margin-top:12px;font-size:14px;color:#475569'>"
+                f"<strong>附件（{len(attachments)}）</strong>"
+                f"<ul style='margin:6px 0 0;padding-left:20px'>{''.join(attachment_rows)}</ul>"
+                "</div>"
+            )
+            if attachment_rows
+            else ""
+        )
         metadata = " · ".join(
             html.escape(str(value))
             for value in (notice.get("department"), notice.get("publish_time"))
@@ -75,7 +79,8 @@ def _render_html(notices: list[dict], attach_files: bool, date_text: str) -> str
         )
         metadata_html = (
             f"<div style='margin:7px 0 12px;font-size:13px;color:#64748b'>{metadata}</div>"
-            if metadata else ""
+            if metadata
+            else ""
         )
         sections.append(
             "<div style='margin:0 0 20px;padding:20px;border:1px solid #e2e8f0;"
@@ -97,7 +102,7 @@ def _render_html(notices: list[dict], attach_files: bool, date_text: str) -> str
         "<div style='display:none;max-height:0;overflow:hidden;color:transparent'>"
         f"{html.escape(date_text)} 共 {len(notices)} 条学校通知</div>"
         "<div style='max-width:680px;margin:0 auto;padding:28px 16px;"
-        "font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",\"Microsoft YaHei\",Arial,sans-serif'>"
+        'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",Arial,sans-serif\'>'
         "<div style='margin-bottom:22px'>"
         "<div style='font-size:26px;line-height:1.35;font-weight:800;color:#0f172a'>"
         "长安大学通知日报</div>"
@@ -105,11 +110,11 @@ def _render_html(notices: list[dict], attach_files: bool, date_text: str) -> str
         f"共 {len(notices)} 条</div></div>"
         + "".join(sections)
         + "<div style='padding:18px 8px 4px;text-align:center;font-size:12px;"
-          "line-height:1.7;color:#94a3b8'>"
-          "本邮件由校园通知系统自动发送。<br>"
-          f"不希望继续接收？<a href='{unsubscribe_url}' "
-          "style='color:#64748b;text-decoration:underline'>退订此日报</a>"
-          "</div></div></body></html>"
+        "line-height:1.7;color:#94a3b8'>"
+        "本邮件由校园通知系统自动发送。<br>"
+        f"不希望继续接收？<a href='{unsubscribe_url}' "
+        "style='color:#64748b;text-decoration:underline'>退订此日报</a>"
+        "</div></div></body></html>"
     )
 
 
@@ -135,8 +140,7 @@ def send_digest(notices: list[dict], date_text: str, message_id: str) -> None:
         attachment_text = ""
         if item.get("attachments"):
             names = "\n".join(
-                f"- {_attachment_name(attachment)}"
-                for attachment in item["attachments"]
+                f"- {_attachment_name(attachment)}" for attachment in item["attachments"]
             )
             attachment_text = f"\n附件：\n{names}"
         plain_sections.append(
@@ -154,7 +158,9 @@ def send_digest(notices: list[dict], date_text: str, message_id: str) -> None:
             mime, _ = mimetypes.guess_type(safe_name)
             maintype, subtype = (mime or "application/octet-stream").split("/", 1)
             message.add_attachment(
-                item["path_obj"].read_bytes(), maintype=maintype, subtype=subtype,
+                item["path_obj"].read_bytes(),
+                maintype=maintype,
+                subtype=subtype,
                 filename=safe_name,
             )
 

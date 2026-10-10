@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -10,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from config import settings
 
 NoticeSaveStatus = Literal["new", "updated", "unchanged", "baseline"]
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notices (
@@ -34,6 +36,7 @@ CREATE TABLE IF NOT EXISTS mail_deliveries (
     message_key TEXT NOT NULL UNIQUE,
     message_id TEXT NOT NULL,
     notice_ids_json TEXT NOT NULL,
+    notice_versions_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -79,8 +82,18 @@ def init_db() -> None:
             row["name"] for row in conn.execute("PRAGMA table_info(mail_deliveries)")
         }
         _add_column_if_missing(
-            conn, "mail_deliveries", delivery_columns,
-            "failure_count", "INTEGER NOT NULL DEFAULT 0",
+            conn,
+            "mail_deliveries",
+            delivery_columns,
+            "failure_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _add_column_if_missing(
+            conn,
+            "mail_deliveries",
+            delivery_columns,
+            "notice_versions_json",
+            "TEXT NOT NULL DEFAULT '[]'",
         )
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(notices)")}
         _add_column_if_missing(conn, "notices", columns, "fetched_date", "TEXT NOT NULL DEFAULT ''")
@@ -90,12 +103,9 @@ def init_db() -> None:
             conn, "notices", columns, "revision_count", "INTEGER NOT NULL DEFAULT 1"
         )
         conn.execute(
-            "UPDATE notices SET fetched_date = substr(fetched_at, 1, 10) "
-            "WHERE fetched_date = ''"
+            "UPDATE notices SET fetched_date = substr(fetched_at, 1, 10) WHERE fetched_date = ''"
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_notices_unsent ON notices(sent, id)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_notices_unsent ON notices(sent, id)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mail_deliveries_status "
             "ON mail_deliveries(status, updated_at)"
@@ -198,23 +208,42 @@ def _row_to_notice(row: sqlite3.Row) -> dict:
 def get_unsent_notices() -> list[dict]:
     """返回全部历史待发通知，避免跨天后永久滞留。"""
     with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM notices WHERE sent = 0 ORDER BY id"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM notices WHERE sent = 0 ORDER BY id").fetchall()
     return [_row_to_notice(row) for row in rows]
 
 
-def ensure_delivery(message_key: str, message_id: str, notice_ids: list[int]) -> dict:
+def ensure_delivery(
+    message_key: str,
+    message_id: str,
+    notice_ids: list[int],
+    notice_versions: list[dict] | None = None,
+) -> dict:
     now_text = datetime.now(settings.timezone).isoformat(timespec="seconds")
     notice_ids_json = json.dumps(sorted(notice_ids))
     with connect() as conn:
+        if notice_versions is None:
+            placeholders = ",".join("?" for _ in notice_ids)
+            notice_versions = (
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT id, revision_count, content_hash FROM notices "
+                        f"WHERE id IN ({placeholders}) ORDER BY id",
+                        notice_ids,
+                    )
+                ]
+                if notice_ids
+                else []
+            )
+        notice_versions_json = json.dumps(notice_versions, sort_keys=True)
         conn.execute(
             """
             INSERT OR IGNORE INTO mail_deliveries
-                (message_key, message_id, notice_ids_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+                (message_key, message_id, notice_ids_json, notice_versions_json,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (message_key, message_id, notice_ids_json, now_text, now_text),
+            (message_key, message_id, notice_ids_json, notice_versions_json, now_text, now_text),
         )
         row = conn.execute(
             "SELECT * FROM mail_deliveries WHERE message_key = ?",
@@ -261,15 +290,29 @@ def fail_delivery(message_key: str, error: str) -> None:
 
 
 def complete_delivery(message_key: str, notice_ids: list[int]) -> None:
-    """在一个 SQLite 事务中完成投递记录和通知状态更新。"""
+    """原子完成投递记录，仅确认与发送快照相符的通知修订。"""
     if not notice_ids:
         return
     now_text = datetime.now(settings.timezone).isoformat(timespec="seconds")
-    placeholders = ",".join("?" for _ in notice_ids)
     with connect() as conn:
-        conn.execute(
-            f"UPDATE notices SET sent = 1, sent_at = ? WHERE id IN ({placeholders})",
-            [now_text, *notice_ids],
+        delivery = conn.execute(
+            "SELECT notice_versions_json FROM mail_deliveries WHERE message_key = ?",
+            (message_key,),
+        ).fetchone()
+        if delivery is None:
+            raise RuntimeError("邮件投递记录不存在")
+        versions = json.loads(delivery["notice_versions_json"])
+        if not versions:
+            log.warning("投递记录缺少修订快照，未确认任何通知：%s", message_key)
+        allowed_ids = set(notice_ids)
+        conn.executemany(
+            "UPDATE notices SET sent = 1, sent_at = ? "
+            "WHERE id = ? AND revision_count = ? AND content_hash = ? AND sent = 0",
+            [
+                (now_text, version["id"], version["revision_count"], version["content_hash"])
+                for version in versions
+                if version["id"] in allowed_ids
+            ],
         )
         conn.execute(
             """

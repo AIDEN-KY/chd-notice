@@ -76,10 +76,17 @@ def test_detail_waits_for_population_and_closes_page(monkeypatch, load_fails) ->
     monkeypatch.setattr(scraper, "_goto_with_retry", goto)
     monkeypatch.setattr(scraper, "_is_login_page", is_login)
     monkeypatch.setattr(scraper, "_matching_selector", selector)
-    monkeypatch.setattr(scraper, "settings", SimpleNamespace(
-        spa_wait_ms=1, action_timeout_ms=1234, spa_load_timeout_ms=5678,
-        detail_content_selectors=[".body"], attachment_selectors=[],
-    ))
+    monkeypatch.setattr(
+        scraper,
+        "settings",
+        SimpleNamespace(
+            spa_wait_ms=1,
+            action_timeout_ms=1234,
+            spa_load_timeout_ms=5678,
+            detail_content_selectors=[".body"],
+            attachment_selectors=[],
+        ),
+    )
     context = SimpleNamespace(new_page=new_page)
     if load_fails == "container":
         with pytest.raises(RuntimeError, match="正文区域在 5.678 秒内未渲染"):
@@ -89,7 +96,8 @@ def test_detail_waits_for_population_and_closes_page(monkeypatch, load_fails) ->
             _run_immediate(scraper._scrape_detail(context, page.url))
     else:
         assert _run_immediate(scraper._scrape_detail(context, page.url)) == (
-            "<p>完整正文</p>", [],
+            "<p>完整正文</p>",
+            [],
         )
     assert page.closed
 
@@ -148,11 +156,19 @@ def test_api_diagnostics_extract_notice_objects_without_full_payload() -> None:
 
 def test_api_list_preserves_ids_and_full_department_and_old_urls() -> None:
     old_url = "https://portal.chd.edu.cn/index.do#/show?dm=stable-id&lm=旧栏目"
-    payload = {"code": "0", "data": [
-        {"GGDM": "stable-id", "GGBT": "通知 标题", "FBSJ": "2026-10-10 18:00:01",
-         "FBBM": "信息与网络管理处（数字校园建设中心）", "LMMC": "信息与网"},
-        {"GGDM": "new-id", "GGBT": "新通知", "LMMC": "图书馆"},
-    ]}
+    payload = {
+        "code": "0",
+        "data": [
+            {
+                "GGDM": "stable-id",
+                "GGBT": "通知 标题",
+                "FBSJ": "2026-10-10 18:00:01",
+                "FBBM": "信息与网络管理处（数字校园建设中心）",
+                "LMMC": "信息与网",
+            },
+            {"GGDM": "new-id", "GGBT": "新通知", "LMMC": "图书馆"},
+        ],
+    }
     notices = parse_api_notices(payload, {"stable-id": old_url})
     assert notices[0]["detail_url"] == old_url
     assert notices[0]["department"] == "信息与网络管理处（数字校园建设中心）"
@@ -197,9 +213,7 @@ def test_pagination_stops_after_three_consecutive_known_pages() -> None:
         )
         assert reason == ("known-pages" if page_number == 3 else None)
 
-    reason, consecutive = evaluate_pagination_page(
-        ("new-url",), seen_pages, consecutive, False, 3
-    )
+    reason, consecutive = evaluate_pagination_page(("new-url",), seen_pages, consecutive, False, 3)
     assert reason is None
     assert consecutive == 0
 
@@ -207,14 +221,10 @@ def test_pagination_stops_after_three_consecutive_known_pages() -> None:
 def test_pagination_stops_when_a_page_repeats() -> None:
     seen_pages = set()
     fingerprint = ("url-1", "url-2")
-    reason, consecutive = evaluate_pagination_page(
-        fingerprint, seen_pages, 0, False, 3
-    )
+    reason, consecutive = evaluate_pagination_page(fingerprint, seen_pages, 0, False, 3)
     assert reason is None
 
-    reason, consecutive = evaluate_pagination_page(
-        fingerprint, seen_pages, consecutive, False, 3
-    )
+    reason, consecutive = evaluate_pagination_page(fingerprint, seen_pages, consecutive, False, 3)
     assert reason == "repeated"
 
 
@@ -261,9 +271,7 @@ class _FakePage:
     async def wait_for_timeout(self, _milliseconds: int) -> None:
         return None
 
-    async def wait_for_function(
-        self, _script: str, *, arg: object, timeout: int
-    ) -> None:
+    async def wait_for_function(self, _script: str, *, arg: object, timeout: int) -> None:
         assert timeout == 1234
         if arg == [".row"]:
             return
@@ -421,9 +429,7 @@ def test_list_item_searches_later_scroll_batches(monkeypatch) -> None:
     )
     page = LazyPage()
 
-    matched = _run_immediate(
-        scraper._list_item_by_title(page, ".row", "滚动后目标")
-    )
+    matched = _run_immediate(scraper._list_item_by_title(page, ".row", "滚动后目标"))
     assert matched.title == "滚动后目标"
 
 

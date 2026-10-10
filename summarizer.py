@@ -50,7 +50,10 @@ async def summarize(title: str, content_html: str) -> str:
                 delay = settings.retry_backoff_seconds * attempt
                 log.warning(
                     "DeepSeek 摘要失败（第 %d/%d 次）：%s；%d 秒后重试",
-                    attempt, settings.retry_attempts, error, delay,
+                    attempt,
+                    settings.retry_attempts,
+                    error,
+                    delay,
                 )
                 await asyncio.sleep(delay)
             else:

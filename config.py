@@ -23,13 +23,9 @@ def _selectors(env_name: str, defaults: list[str]) -> list[str]:
 @dataclass(frozen=True)
 class Settings:
     login_url: str = "https://ids.chd.edu.cn/authserver/login"
-    notices_url: str = (
-        "https://portal.chd.edu.cn/qljfwapp/sys/lwPsTzggApp/"
-        "*default/index.do#/tzgg"
-    )
+    notices_url: str = "https://portal.chd.edu.cn/qljfwapp/sys/lwPsTzggApp/*default/index.do#/tzgg"
     list_api_url: str = (
-        "https://portal.chd.edu.cn/qljfwapp/sys/lwPsTzggApp/"
-        "bulletinController/getGGInfo.do"
+        "https://portal.chd.edu.cn/qljfwapp/sys/lwPsTzggApp/bulletinController/getGGInfo.do"
     )
     list_page_size: int = 12
     auth_file: Path = BASE_DIR / "auth.json"
@@ -57,54 +53,77 @@ class Settings:
     smtp_port: int = 465
 
     # 多个候选选择器用 || 分隔，可在 .env 中覆盖。
-    list_item_selectors: list[str] = field(default_factory=lambda: _selectors(
-        "LIST_ITEM_SELECTORS",
-        [
-            ".bh-border-color-gray-5.bh-bg-color-light",
-            ".news-list li",
-            ".notice-list li",
-            ".bh-list li",
-            ".list-group-item",
-            "tbody tr",
-        ],
-    ))
-    title_selectors: list[str] = field(default_factory=lambda: _selectors(
-        "TITLE_SELECTORS",
-        ["#readClass", ".title", ".news-title", ".notice-title", "td:nth-child(1)", "a"],
-    ))
-    time_selectors: list[str] = field(default_factory=lambda: _selectors(
-        "TIME_SELECTORS",
-        [".time_class", ".time", ".date", ".publish-time", "td:nth-last-child(2)"],
-    ))
-    department_selectors: list[str] = field(default_factory=lambda: _selectors(
-        "DEPARTMENT_SELECTORS",
-        [".lmmc_class", ".department", ".dept", ".publisher", "td:nth-last-child(1)"],
-    ))
-    detail_link_selectors: list[str] = field(default_factory=lambda: _selectors(
-        "DETAIL_LINK_SELECTORS", ["a[href]"]
-    ))
-    detail_content_selectors: list[str] = field(default_factory=lambda: _selectors(
-        "DETAIL_CONTENT_SELECTORS",
-        [
-            ".ggnrclass",
-            ".article-content",
-            ".news-content",
-            ".notice-content",
-            ".bh-article-content",
-            ".content",
-        ],
-    ))
-    attachment_selectors: list[str] = field(default_factory=lambda: _selectors(
-        "ATTACHMENT_SELECTORS",
-        [".attachment a[href]", ".attachments a[href]", "a[href*='download']", "a[href*='file']"],
-    ))
-    next_page_selectors: list[str] = field(default_factory=lambda: _selectors(
-        "NEXT_PAGE_SELECTORS",
-        [".pagination .next:not(.disabled)", ".el-pagination .btn-next:not([disabled])", "a[title='下一页']"],
-    ))
-    scroll_container_selectors: list[str] = field(default_factory=lambda: _selectors(
-        "SCROLL_CONTAINER_SELECTORS", ["#app"]
-    ))
+    list_item_selectors: list[str] = field(
+        default_factory=lambda: _selectors(
+            "LIST_ITEM_SELECTORS",
+            [
+                ".bh-border-color-gray-5.bh-bg-color-light",
+                ".news-list li",
+                ".notice-list li",
+                ".bh-list li",
+                ".list-group-item",
+                "tbody tr",
+            ],
+        )
+    )
+    title_selectors: list[str] = field(
+        default_factory=lambda: _selectors(
+            "TITLE_SELECTORS",
+            ["#readClass", ".title", ".news-title", ".notice-title", "td:nth-child(1)", "a"],
+        )
+    )
+    time_selectors: list[str] = field(
+        default_factory=lambda: _selectors(
+            "TIME_SELECTORS",
+            [".time_class", ".time", ".date", ".publish-time", "td:nth-last-child(2)"],
+        )
+    )
+    department_selectors: list[str] = field(
+        default_factory=lambda: _selectors(
+            "DEPARTMENT_SELECTORS",
+            [".lmmc_class", ".department", ".dept", ".publisher", "td:nth-last-child(1)"],
+        )
+    )
+    detail_link_selectors: list[str] = field(
+        default_factory=lambda: _selectors("DETAIL_LINK_SELECTORS", ["a[href]"])
+    )
+    detail_content_selectors: list[str] = field(
+        default_factory=lambda: _selectors(
+            "DETAIL_CONTENT_SELECTORS",
+            [
+                ".ggnrclass",
+                ".article-content",
+                ".news-content",
+                ".notice-content",
+                ".bh-article-content",
+                ".content",
+            ],
+        )
+    )
+    attachment_selectors: list[str] = field(
+        default_factory=lambda: _selectors(
+            "ATTACHMENT_SELECTORS",
+            [
+                ".attachment a[href]",
+                ".attachments a[href]",
+                "a[href*='download']",
+                "a[href*='file']",
+            ],
+        )
+    )
+    next_page_selectors: list[str] = field(
+        default_factory=lambda: _selectors(
+            "NEXT_PAGE_SELECTORS",
+            [
+                ".pagination .next:not(.disabled)",
+                ".el-pagination .btn-next:not([disabled])",
+                "a[title='下一页']",
+            ],
+        )
+    )
+    scroll_container_selectors: list[str] = field(
+        default_factory=lambda: _selectors("SCROLL_CONTAINER_SELECTORS", ["#app"])
+    )
 
     @property
     def deepseek_api_key(self) -> str:

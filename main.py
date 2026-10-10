@@ -26,9 +26,7 @@ from version import VERSION  # noqa: E402
 
 def configure_logging() -> None:
     settings.log_dir.mkdir(parents=True, exist_ok=True)
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-    )
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     file_handler = TimedRotatingFileHandler(
@@ -93,14 +91,9 @@ def main() -> None:
             json.dumps(diagnostics, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        print(
-            f"已保存 {len(diagnostics)} 个接口摘要："
-            f"{settings.api_diagnostics_file}"
-        )
+        print(f"已保存 {len(diagnostics)} 个接口摘要：{settings.api_diagnostics_file}")
     elif args.command == "diagnose-pagination":
-        diagnostics = asyncio.run(
-            diagnose_pagination(headless=False, wait_for_user=True)
-        )
+        diagnostics = asyncio.run(diagnose_pagination(headless=False, wait_for_user=True))
         print(json.dumps(diagnostics, ensure_ascii=False, indent=2))
     elif args.command == "scrape":
         stats = asyncio.run(scrape_notices())

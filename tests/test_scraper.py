@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import scraper
 
 
@@ -81,12 +83,16 @@ def test_missing_list_selector_still_collects_dom_diagnostics(tmp_path, monkeypa
         assert timeout_ms == 45_000
         return None
 
-    monkeypatch.setattr(scraper, "settings", SimpleNamespace(
-        auth_file=auth_file,
-        notices_url=page_url,
-        spa_wait_ms=1,
-        list_item_selectors=[".missing-notice-row"],
-    ))
+    monkeypatch.setattr(
+        scraper,
+        "settings",
+        SimpleNamespace(
+            auth_file=auth_file,
+            notices_url=page_url,
+            spa_wait_ms=1,
+            list_item_selectors=[".missing-notice-row"],
+        ),
+    )
     monkeypatch.setattr(scraper, "async_playwright", FakePlaywright)
     monkeypatch.setattr(scraper, "_goto_with_retry", goto)
     monkeypatch.setattr(scraper, "_is_login_page", is_login)
@@ -110,3 +116,69 @@ def test_missing_list_selector_still_collects_dom_diagnostics(tmp_path, monkeypa
     assert diagnostics["scrollables"][0]["id"] == "notice-container"
     assert diagnostics["likelyRows"][0]["selector"] == "div.actual-row"
     assert events == ["scroll", "collect-dom", "close-context", "close-browser"]
+
+
+@pytest.mark.parametrize(
+    ("response_url", "is_login_redirect"),
+    [
+        ("https://ids.chd.edu.cn/authserver/login?service=portal", True),
+        ("https://portal.chd.edu.cn/authserver/login", True),
+        ("https://portal.chd.edu.cn/files/report.html", False),
+    ],
+    ids=["cas-host", "login-path", "legitimate-html-attachment"],
+)
+def test_attachment_download_rejects_login_redirects(
+    tmp_path, monkeypatch, response_url, is_login_redirect
+):
+    """HTTP 200 登录页不能充当附件，但普通 HTML 文件仍可下载。"""
+    original_url = "https://portal.chd.edu.cn/files/report.html"
+    payload = b"<!doctype html><html><body>HTML document</body></html>"
+    body_reads = []
+    download_dir = tmp_path / "downloads"
+
+    class FakeResponse:
+        ok = True
+        status = 200
+        url = response_url
+        headers = {"content-type": "text/html; charset=utf-8"}
+
+        async def body(self):
+            body_reads.append(True)
+            return payload
+
+    async def get(url, *, timeout):
+        assert url == original_url
+        assert timeout == 1234
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        scraper,
+        "settings",
+        SimpleNamespace(
+            action_timeout_ms=1234,
+            attachment_dir=download_dir,
+            login_url="https://ids.chd.edu.cn/authserver/login",
+        ),
+    )
+    context = SimpleNamespace(request=SimpleNamespace(get=get))
+    coroutine = scraper._download_attachment(context, original_url, "report.html")
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        attachment = completed.value
+    else:
+        coroutine.close()
+        raise AssertionError("测试替身不应挂起协程")
+
+    assert attachment["url"] == original_url
+    assert attachment["name"] == "report.html"
+    if is_login_redirect:
+        assert attachment["path"] == "", "登录响应不能保存为可发送的附件"
+        assert attachment["size"] == 0
+        assert body_reads == []
+        assert not download_dir.exists()
+    else:
+        assert attachment["size"] == len(payload)
+        assert body_reads == [True]
+        assert len(list(download_dir.iterdir())) == 1
+        assert next(download_dir.iterdir()).read_bytes() == payload

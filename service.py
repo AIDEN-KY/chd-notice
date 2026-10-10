@@ -55,11 +55,19 @@ async def send_pending_today() -> int:
         return 0
 
     notice_ids = [int(item["id"]) for item in notices]
+    notice_versions = [
+        {
+            "id": int(item["id"]),
+            "revision_count": int(item["revision_count"]),
+            "content_hash": str(item["content_hash"] or ""),
+        }
+        for item in notices
+    ]
     message_key, message_id = delivery_identity(notices)
-    delivery = ensure_delivery(message_key, message_id, notice_ids)
+    delivery = ensure_delivery(message_key, message_id, notice_ids, notice_versions)
     if delivery["status"] == "sent":
         complete_delivery(message_key, notice_ids)
-        log.warning("投递记录已成功，已修复通知发送状态而不重复投递")
+        log.warning("投递记录已成功，已按修订快照核对通知状态而不重复投递")
         return 0
 
     for index, notice in enumerate(notices, start=1):

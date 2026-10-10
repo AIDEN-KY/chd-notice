@@ -106,6 +106,69 @@ def test_send_service_records_failure_and_keeps_notice_pending(tmp_path, monkeyp
     assert "SMTP timeout" in delivery["last_error"]
 
 
+def test_send_completion_keeps_newer_notice_revision_pending(tmp_path, monkeypatch) -> None:
+    """旧修订投递成功时，发送期间产生的新修订必须仍可在下次投递。"""
+    _configure_temp_database(tmp_path, monkeypatch)
+    _insert_historical_notice()
+    updated_notice_id = db.get_unsent_notices()[0]["id"]
+    db.save_notice(
+        {
+            "title": "未发生修改的通知",
+            "publish_time": "2026-10-10",
+            "department": "测试部门",
+            "detail_url": "https://example.test/unchanged-notice",
+            "content_html": "<p>不变的正文</p>",
+            "attachments": [],
+        },
+        "unchanged-hash",
+    )
+    sent_snapshots = []
+
+    async def fake_summarize(title, content_html):
+        return title
+
+    def fake_send_digest(notices, date_text, message_id):
+        sent_snapshots.append(notices)
+        original = next(notice for notice in notices if notice["id"] == updated_notice_id)
+        assert original["content_hash"] == "content-hash-v1"
+        assert original["revision_count"] == 1
+        # 确定性地复现交错：SMTP 发送旧快照期间，另一次抓取保存了新修订。
+        assert (
+            db.save_notice(
+                {**original, "content_html": "<p>发送期间修改后的正文</p>"},
+                "content-hash-v2",
+            )
+            == "updated"
+        )
+
+    async def fake_to_thread(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(service, "summarize", fake_summarize)
+    monkeypatch.setattr(service, "send_digest", fake_send_digest)
+    monkeypatch.setattr(service.asyncio, "to_thread", fake_to_thread)
+
+    assert _run_immediate(service.send_pending_today()) == 2
+    assert len(sent_snapshots) == 1
+    with db.connect() as conn:
+        revised = conn.execute(
+            "SELECT * FROM notices WHERE id = ?", (updated_notice_id,)
+        ).fetchone()
+        unchanged = conn.execute(
+            "SELECT sent FROM notices WHERE detail_url = ?",
+            ("https://example.test/unchanged-notice",),
+        ).fetchone()
+        delivery = conn.execute("SELECT status FROM mail_deliveries").fetchone()
+
+    assert delivery["status"] == "sent"
+    assert unchanged["sent"] == 1
+    assert revised["revision_count"] == 2
+    assert revised["content_hash"] == "content-hash-v2"
+    assert revised["sent"] == 0, "旧修订的投递完成操作不能确认未发送的新修订"
+    assert revised["sent_at"] is None
+    assert [notice["id"] for notice in db.get_unsent_notices()] == [updated_notice_id]
+
+
 def test_daily_run_alerts_when_cas_session_expires_and_continues(monkeypatch) -> None:
     alerts = []
     pending_calls = []

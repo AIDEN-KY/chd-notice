@@ -119,3 +119,41 @@ def test_v1_database_hash_baseline_does_not_requeue(tmp_path, monkeypatch) -> No
 
     assert db.save_notice(_notice(), "hash-v1") == "baseline"
     assert db.get_unsent_notices() == []
+
+
+def test_delivery_completion_does_not_acknowledge_restored_content_revision(tmp_path, monkeypatch):
+    """正文改回旧内容时哈希相同，但新的修订仍不能由旧投递确认。"""
+    _use_temp_database(tmp_path, monkeypatch)
+    db.save_notice(_notice(), "hash-v1")
+    notice_id = db.get_unsent_notices()[0]["id"]
+    db.ensure_delivery("old-delivery", "<old@test>", [notice_id])
+    assert db.save_notice(_notice(body="临时修改"), "hash-v2") == "updated"
+    assert db.save_notice(_notice(), "hash-v1") == "updated"
+    # 模拟恢复任务再次查找同一个旧投递；首次记录的快照不能被覆盖。
+    db.ensure_delivery("old-delivery", "<old@test>", [notice_id])
+    db.complete_delivery("old-delivery", [notice_id])
+
+    pending = db.get_unsent_notices()
+    assert len(pending) == 1, "旧投递不能确认内容相同但修订号已变化的通知"
+    assert pending[0]["revision_count"] == 3
+    assert pending[0]["sent_at"] is None
+
+
+def test_legacy_delivery_without_snapshot_cannot_acknowledge_current_revision(
+    tmp_path, monkeypatch
+):
+    """旧表迁移不能将当前版本猜测成历史投递版本。"""
+    _use_temp_database(tmp_path, monkeypatch)
+    db.save_notice(_notice(), "hash-v1")
+    notice_id = db.get_unsent_notices()[0]["id"]
+    db.ensure_delivery("legacy", "<legacy@test>", [notice_id])
+    with db.connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(mail_deliveries)")}
+        if "notice_versions_json" in columns:
+            conn.execute("ALTER TABLE mail_deliveries DROP COLUMN notice_versions_json")
+    db.init_db()
+    db.init_db()
+    db.complete_delivery("legacy", [notice_id])
+
+    assert [notice["id"] for notice in db.get_unsent_notices()] == [notice_id]
+    assert db.get_delivery("legacy")["status"] == "sent"

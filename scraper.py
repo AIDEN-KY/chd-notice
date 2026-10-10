@@ -63,9 +63,7 @@ def evaluate_pagination_page(
 
 def notice_content_hash(notice: dict) -> str:
     """对用户可见文本和附件元数据生成稳定哈希，忽略 HTML 样式变化。"""
-    content_text = BeautifulSoup(
-        notice.get("content_html", ""), "html.parser"
-    ).get_text(" ")
+    content_text = BeautifulSoup(notice.get("content_html", ""), "html.parser").get_text(" ")
 
     def normalized(value: object) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -87,9 +85,9 @@ def notice_content_hash(notice: dict) -> str:
         "content": normalized(content_text),
         "attachments": attachments,
     }
-    encoded = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -107,15 +105,12 @@ def _notice_candidates(payload: object, limit: int = 50) -> list[dict]:
                 if item is None or isinstance(item, (str, int, float, bool))
             }
             lower_keys = {key.lower() for key in scalar}
-            text_values = " ".join(
-                item for item in scalar.values() if isinstance(item, str)
+            text_values = " ".join(item for item in scalar.values() if isinstance(item, str))
+            has_identifier = any(key == "dm" or key.endswith("dm") for key in lower_keys)
+            has_title = (
+                bool(lower_keys & {"bt", "title", "ggbt", "tzbt", "mc", "ggmc"})
+                or "通知" in text_values
             )
-            has_identifier = any(
-                key == "dm" or key.endswith("dm") for key in lower_keys
-            )
-            has_title = bool(
-                lower_keys & {"bt", "title", "ggbt", "tzbt", "mc", "ggmc"}
-            ) or "通知" in text_values
             if scalar and has_identifier and has_title:
                 results.append({"path": path, "fields": scalar})
             for key, item in value.items():
@@ -144,7 +139,10 @@ async def _goto_with_retry(page: Page, url: str) -> None:
             delay = settings.retry_backoff_seconds * attempt
             log.warning(
                 "页面打开失败（第 %d/%d 次）：%s；%d 秒后重试",
-                attempt, settings.retry_attempts, exc, delay,
+                attempt,
+                settings.retry_attempts,
+                exc,
+                delay,
             )
             await page.wait_for_timeout(delay * 1000)
 
@@ -225,8 +223,7 @@ async def _open_notice_list(page: Page) -> str:
         await page.wait_for_timeout(delay * 1000)
 
     raise RuntimeError(
-        f"SPA 连续 {settings.retry_attempts} 次未渲染通知列表；"
-        "请检查网络、CAS 会话或列表选择器"
+        f"SPA 连续 {settings.retry_attempts} 次未渲染通知列表；请检查网络、CAS 会话或列表选择器"
     )
 
 
@@ -316,9 +313,7 @@ async def _list_item_by_title(page: Page, item_selector: str, title: str):
         await page.wait_for_timeout(settings.spa_wait_ms)
 
     preview = "、".join(item for item in last_titles[:3] if item)
-    raise RuntimeError(
-        f"滚动搜索后仍未找到通知：{title}；当前批次示例：{preview or '空'}"
-    )
+    raise RuntimeError(f"滚动搜索后仍未找到通知：{title}；当前批次示例：{preview or '空'}")
 
 
 async def _is_login_page(page: Page) -> bool:
@@ -342,6 +337,12 @@ async def _download_attachment(context: BrowserContext, url: str, name: str) -> 
         response = await context.request.get(url, timeout=settings.action_timeout_ms)
         if not response.ok:
             raise RuntimeError(f"HTTP {response.status}")
+        response_url = urlparse(response.url)
+        login_url = urlparse(settings.login_url)
+        if response_url.hostname == login_url.hostname or response_url.path.rstrip(
+            "/"
+        ) == login_url.path.rstrip("/"):
+            raise SessionExpiredError("附件请求返回登录页，会话可能已过期")
         body = await response.body()
         settings.attachment_dir.mkdir(parents=True, exist_ok=True)
         target = settings.attachment_dir / _safe_filename(name, url)
@@ -399,9 +400,7 @@ async def _scrape_detail(context: BrowserContext, url: str) -> tuple[str, list[d
                     continue
                 seen.add(absolute)
                 name = (await link.inner_text()).strip() or Path(urlparse(absolute).path).name
-                attachments.append(
-                    {"name": name, "url": absolute, "path": "", "size": 0}
-                )
+                attachments.append({"name": name, "url": absolute, "path": "", "size": 0})
         return content_html, attachments
     finally:
         await page.close()
@@ -420,11 +419,13 @@ async def _extract_list_page(page: Page) -> list[dict]:
         title = await _row_title(item)
         if not title:
             continue
-        raw.append({
-            "title": title,
-            "publish_time": await _first_text(item, settings.time_selectors),
-            "department": await _first_text(item, settings.department_selectors),
-        })
+        raw.append(
+            {
+                "title": title,
+                "publish_time": await _first_text(item, settings.time_selectors),
+                "department": await _first_text(item, settings.department_selectors),
+            }
+        )
 
     if not raw:
         raise RuntimeError("找到了列表容器，但未提取到有效通知标题")
@@ -450,9 +451,7 @@ async def _extract_list_page(page: Page) -> list[dict]:
         await page.wait_for_timeout(settings.spa_wait_ms)
         detail_title = await _first_page_text(page, settings.title_selectors)
         if detail_title and detail_title != info["title"]:
-            raise RuntimeError(
-                f"详情标题校验失败：期望“{info['title']}”，实际“{detail_title}”"
-            )
+            raise RuntimeError(f"详情标题校验失败：期望“{info['title']}”，实际“{detail_title}”")
         info["detail_url"] = page.url
         result.append(info)
         await page.go_back()
@@ -464,12 +463,10 @@ async def _extract_list_page(page: Page) -> list[dict]:
         if not await _restore_list_count(page, selector, len(raw)):
             restored_count = await page.locator(selector).count()
             raise RuntimeError(
-                f"返回列表后仅恢复 {restored_count}/{len(raw)} 条通知，"
-                "无法安全继续匹配详情"
+                f"返回列表后仅恢复 {restored_count}/{len(raw)} 条通知，无法安全继续匹配详情"
             )
 
     return result
-
 
 
 async def _go_next(page: Page, page_number: int) -> bool:
@@ -559,7 +556,7 @@ async def _collect_pagination_diagnostics(page: Page) -> dict:
     await page.evaluate(
         """
         () => {
-          window.scrollTo(0, document.body.scrollHeight);
+          window.scrollTo(0, document.body?.scrollHeight || 0);
           for (const el of document.querySelectorAll('*')) {
             if (el.scrollHeight > el.clientHeight + 10) {
               el.scrollTop = el.scrollHeight;
@@ -638,7 +635,7 @@ async def _collect_pagination_diagnostics(page: Page) -> dict:
             configuredListSelectors,
             matchedListSelector,
             url: location.href,
-            bodyTextEnd: (document.body.innerText || '').slice(-1000),
+            bodyTextEnd: (document.body?.innerText || '').slice(-1000),
             candidates,
             scrollables,
             likelyRows,
@@ -694,13 +691,9 @@ async def diagnose_pagination(
             except Exception:
                 if not wait_for_user:
                     raise
-                log.exception(
-                    "自动打开门户失败；请在已打开的浏览器中手动刷新或访问通知页"
-                )
+                log.exception("自动打开门户失败；请在已打开的浏览器中手动刷新或访问通知页")
             if wait_for_user:
-                print(
-                    "请在 Chromium 中确认通知列表已经完整显示；如未显示，可手动刷新或登录。"
-                )
+                print("请在 Chromium 中确认通知列表已经完整显示；如未显示，可手动刷新或登录。")
                 await asyncio.to_thread(
                     input,
                     "确认列表可见后，回到此终端按 Enter 采集分页信息：",
@@ -713,9 +706,7 @@ async def diagnose_pagination(
                 timeout_ms=10_000 if wait_for_user else 45_000,
             )
             if not list_selector:
-                log.warning(
-                    "配置的列表选择器未匹配；将采集页面候选结构用于修复选择器"
-                )
+                log.warning("配置的列表选择器未匹配；将采集页面候选结构用于修复选择器")
             return await _collect_pagination_diagnostics(page)
         finally:
             await context.close()
@@ -769,9 +760,7 @@ async def diagnose_list_api() -> list[dict]:
             try:
                 await _goto_with_retry(page, settings.notices_url)
             except Exception:
-                log.exception(
-                    "自动打开门户失败；请在已打开的浏览器中手动刷新或访问通知页"
-                )
+                log.exception("自动打开门户失败；请在已打开的浏览器中手动刷新或访问通知页")
             print("请在 Chromium 中确认通知列表已经显示；必要时手动刷新或登录。")
             await asyncio.to_thread(
                 input,
@@ -806,12 +795,14 @@ def parse_api_notices(payload: object, existing_urls: dict[str, str]) -> list[di
             + "#/show?"
             + urlencode({"dm": identifier, "lm": str(row.get("LMMC") or "")})
         )
-        result.append({
-            "title": title,
-            "publish_time": str(row.get("FBSJ") or ""),
-            "department": str(row.get("FBBM") or row.get("LMMC") or ""),
-            "detail_url": detail_url,
-        })
+        result.append(
+            {
+                "title": title,
+                "publish_time": str(row.get("FBSJ") or ""),
+                "department": str(row.get("FBBM") or row.get("LMMC") or ""),
+                "detail_url": detail_url,
+            }
+        )
     return result
 
 
@@ -822,10 +813,14 @@ async def _fetch_api_list(
         try:
             response = await context.request.post(
                 settings.list_api_url,
-                form={"data": json.dumps({
-                    "PAGENUM": page_number,
-                    "PAGESIZE": settings.list_page_size,
-                })},
+                form={
+                    "data": json.dumps(
+                        {
+                            "PAGENUM": page_number,
+                            "PAGESIZE": settings.list_page_size,
+                        }
+                    )
+                },
                 headers={"Referer": settings.notices_url},
                 timeout=settings.action_timeout_ms,
             )
@@ -839,8 +834,13 @@ async def _fetch_api_list(
         except Exception as exc:
             if attempt == settings.retry_attempts:
                 raise
-            log.warning("列表接口第 %d 页请求失败（%d/%d）：%s",
-                        page_number, attempt, settings.retry_attempts, exc)
+            log.warning(
+                "列表接口第 %d 页请求失败（%d/%d）：%s",
+                page_number,
+                attempt,
+                settings.retry_attempts,
+                exc,
+            )
             await asyncio.sleep(settings.retry_backoff_seconds * attempt)
     raise RuntimeError("列表接口重试结束")
 
@@ -874,8 +874,7 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
                     break
                 fingerprint = tuple(item["detail_url"] for item in summaries)
                 old_hashes = {
-                    item["detail_url"]: get_notice_hash(item["detail_url"])
-                    for item in summaries
+                    item["detail_url"]: get_notice_hash(item["detail_url"]) for item in summaries
                 }
                 page_all_known = all(value is not None for value in old_hashes.values())
                 stop_reason, consecutive_known_pages = evaluate_pagination_page(
@@ -895,7 +894,10 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
                     old_hash = old_hashes[notice["detail_url"]]
                     log.info(
                         "正在检查第 %d 页详情 %d/%d：%s",
-                        page_number, index, len(summaries), notice["title"],
+                        page_number,
+                        index,
+                        len(summaries),
+                        notice["title"],
                     )
                     content, attachments = await _scrape_detail(context, notice["detail_url"])
                     notice.update(content_html=content, attachments=attachments)
