@@ -106,3 +106,7 @@ GitHub Actions 会在每次 push 和 pull request 时执行 Ruff、pytest 和字
 
 程序会打开有头 Chromium。确认通知列表完整显示后回到终端按 Enter，程序只读取
 分页结构并输出 JSON，不点击通知、不写数据库，也不发送邮件。
+
+如需定位门户列表接口，可运行 `python main.py diagnose-api`。确认列表显示后按
+Enter，程序会把不含 Cookie/请求头的接口摘要保存到本地
+`portal-api-diagnostics.json`；该文件已被 Git 忽略。

@@ -4,7 +4,12 @@ from types import SimpleNamespace
 from typing import Coroutine, TypeVar
 
 import scraper
-from scraper import ScrapeStats, evaluate_pagination_page, notice_content_hash
+from scraper import (
+    ScrapeStats,
+    _notice_candidates,
+    evaluate_pagination_page,
+    notice_content_hash,
+)
 from service import delivery_identity
 from version import VERSION
 
@@ -41,6 +46,26 @@ def test_notice_hash_ignores_html_formatting_and_attachment_order() -> None:
     assert notice_content_hash(first) == notice_content_hash(second)
     second["content_html"] = "<div>报名时间已经变更</div>"
     assert notice_content_hash(first) != notice_content_hash(second)
+
+
+def test_api_diagnostics_extract_notice_objects_without_full_payload() -> None:
+    payload = {
+        "datas": {
+            "rows": [
+                {"DM": "abc123", "BT": "测试通知", "LMMC": "测试部门"},
+                {"value": "无关数据"},
+            ]
+        }
+    }
+
+    candidates = _notice_candidates(payload)
+
+    assert candidates == [
+        {
+            "path": "$.datas.rows[0]",
+            "fields": {"DM": "abc123", "BT": "测试通知", "LMMC": "测试部门"},
+        }
+    ]
 
 
 def test_delivery_identity_changes_with_notice_revision() -> None:

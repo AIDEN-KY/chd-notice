@@ -31,6 +31,7 @@ class Settings:
     database_file: Path = BASE_DIR / "notices.db"
     attachment_dir: Path = BASE_DIR / "downloads"
     log_dir: Path = BASE_DIR / "logs"
+    api_diagnostics_file: Path = BASE_DIR / "portal-api-diagnostics.json"
     timezone: ZoneInfo = ZoneInfo("Asia/Shanghai")
     # 动态翻页：连续遇到若干个全部已知的页面后停止，并设置最大页数兜底。
     max_pages_to_scrape: int = 20

@@ -15,3 +15,4 @@ pw-browsers/
 
 # 本地联调工具，不属于生产版本
 diagnose.py
+portal-api-diagnostics.json

@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
-from playwright.async_api import BrowserContext, Locator, Page, async_playwright
+from playwright.async_api import BrowserContext, Locator, Page, Response, async_playwright
 
 from config import settings
 from db import get_notice_hash, save_notice
@@ -82,6 +82,41 @@ def notice_content_hash(notice: dict) -> str:
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _notice_candidates(payload: object, limit: int = 50) -> list[dict]:
+    """从列表接口 JSON 中提取可能包含标题和 dm 的标量对象，不保存整份响应。"""
+    results: list[dict] = []
+
+    def walk(value: object, path: str) -> None:
+        if len(results) >= limit:
+            return
+        if isinstance(value, dict):
+            scalar = {
+                str(key): item[:500] if isinstance(item, str) else item
+                for key, item in value.items()
+                if item is None or isinstance(item, (str, int, float, bool))
+            }
+            lower_keys = {key.lower() for key in scalar}
+            text_values = " ".join(
+                item for item in scalar.values() if isinstance(item, str)
+            )
+            has_identifier = any(
+                key == "dm" or key.endswith("dm") for key in lower_keys
+            )
+            has_title = bool(
+                lower_keys & {"bt", "title", "ggbt", "tzbt", "mc", "ggmc"}
+            ) or "通知" in text_values
+            if scalar and has_identifier and has_title:
+                results.append({"path": path, "fields": scalar})
+            for key, item in value.items():
+                walk(item, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index}]")
+
+    walk(payload, "$")
+    return results
 
 
 async def _goto_with_retry(page: Page, url: str) -> None:
@@ -649,6 +684,72 @@ async def diagnose_pagination(
                     "配置的列表选择器未匹配；将采集页面候选结构用于修复选择器"
                 )
             return await _collect_pagination_diagnostics(page)
+        finally:
+            await context.close()
+            await browser.close()
+
+
+async def diagnose_list_api() -> list[dict]:
+    """在开发者打开门户时采集列表应用的 JSON 接口摘要。"""
+    if not settings.auth_file.exists():
+        raise SessionExpiredError("未找到 auth.json，请先运行 python main.py init-auth")
+    captured: list[dict] = []
+    pending: set[asyncio.Task] = set()
+
+    async def capture(response: Response) -> None:
+        if "lwPsTzggApp" not in response.url:
+            return
+        if response.request.resource_type not in {"xhr", "fetch"}:
+            return
+        try:
+            payload = await response.json()
+        except Exception:
+            return
+        if isinstance(payload, dict):
+            top_level = list(payload)[:50]
+        elif isinstance(payload, list):
+            top_level = [f"list[{len(payload)}]"]
+        else:
+            top_level = [type(payload).__name__]
+        captured.append(
+            {
+                "url": response.url,
+                "status": response.status,
+                "method": response.request.method,
+                "postData": (response.request.post_data or "")[:2000],
+                "topLevel": top_level,
+                "noticeCandidates": _notice_candidates(payload),
+            }
+        )
+
+    def schedule_capture(response: Response) -> None:
+        task = asyncio.create_task(capture(response))
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=False)
+        context = await browser.new_context(storage_state=settings.auth_file)
+        page = await context.new_page()
+        page.on("response", schedule_capture)
+        try:
+            try:
+                await _goto_with_retry(page, settings.notices_url)
+            except Exception:
+                log.exception(
+                    "自动打开门户失败；请在已打开的浏览器中手动刷新或访问通知页"
+                )
+            print("请在 Chromium 中确认通知列表已经显示；必要时手动刷新或登录。")
+            await asyncio.to_thread(
+                input,
+                "列表可见后回到终端按 Enter，程序将保存接口摘要：",
+            )
+            await page.wait_for_timeout(settings.spa_wait_ms)
+            if await _is_login_page(page):
+                raise SessionExpiredError("会话已过期，请重新手动登录")
+            if pending:
+                await asyncio.gather(*list(pending), return_exceptions=True)
+            return captured
         finally:
             await context.close()
             await browser.close()
