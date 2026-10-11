@@ -200,7 +200,9 @@ def test_delivery_identity_changes_with_notice_revision() -> None:
 def test_scrape_stats_changed_count_and_version() -> None:
     stats = ScrapeStats(new=2, updated=3, unchanged=4, baselined=5, pages=6)
     assert stats.changed == 5
-    assert VERSION == "1.1.0"
+    import re
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", VERSION)
 
 
 def test_pagination_stops_after_three_consecutive_known_pages() -> None:

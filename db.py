@@ -14,6 +14,7 @@ from config import settings
 
 NoticeSaveStatus = Literal["new", "updated", "unchanged", "baseline"]
 log = logging.getLogger(__name__)
+SCHEMA_VERSION = 1
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS summary_cache (
@@ -201,7 +202,9 @@ def _add_column_if_missing(
 def init_db() -> None:
     """创建数据库，并原地升级 v1.0 数据库。"""
     with connect() as conn:
-        conn.executescript(SCHEMA)
+        if conn.execute("PRAGMA user_version").fetchone()[0] > SCHEMA_VERSION:
+            raise ValueError("数据库 schema 版本高于当前程序支持范围")
+        conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
         delivery_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(mail_deliveries)")
         }
@@ -234,6 +237,7 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_mail_deliveries_status "
             "ON mail_deliveries(status, updated_at)"
         )
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
 def validate_email(email: str) -> str:
@@ -841,7 +845,11 @@ def finish_task_run(
 
 
 def get_task_health() -> dict:
-    with connect() as conn:
+    with closing(
+        sqlite3.connect(settings.database_file.resolve().as_uri() + "?mode=ro", uri=True)
+    ) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
         latest = conn.execute("SELECT * FROM task_runs ORDER BY id DESC LIMIT 1").fetchone()
         successful = conn.execute(
             "SELECT finished_at FROM task_runs WHERE scrape_succeeded=1 ORDER BY id DESC LIMIT 1"

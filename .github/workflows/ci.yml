@@ -9,12 +9,17 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
           cache: pip
       - name: Install dependencies
         run: |
@@ -24,5 +29,7 @@ jobs:
         run: python -m ruff check .
       - name: Test
         run: python -m pytest
+      - name: Format
+        run: python -m ruff format --check .
       - name: Compile
-        run: python -m compileall -q .
+        run: python -m compileall -q config.py db.py main.py backup.py healthcheck.py mailer.py scraper.py service.py summarizer.py tests

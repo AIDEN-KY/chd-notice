@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from config import settings
-from db import get_task_health
+from db import get_task_health, validate_email
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +29,22 @@ def run_healthcheck() -> bool:
         else:
             log.error("缺少环境变量：%s", name)
             ok = False
+        if any(character in os.getenv(name, "") for character in ("\r", "\n")):
+            log.error("%s 不得包含换行符（不显示配置值）", name)
+            ok = False
+    try:
+        if hasattr(settings, "history_scan_enabled"):
+            settings.history_scan_enabled
+    except ValueError:
+        log.error("HISTORY_SCAN_ENABLED 配置无效（不显示配置值）")
+        ok = False
+    for name in ("QQ_EMAIL", "MY_EMAIL"):
+        if os.getenv(name, "").strip():
+            try:
+                validate_email(os.getenv(name, ""))
+            except ValueError:
+                log.error("%s 邮箱格式无效（不显示配置值）", name)
+                ok = False
 
     if settings.auth_file.is_file():
         log.info("登录会话文件存在：%s", settings.auth_file)
@@ -46,16 +62,19 @@ def run_healthcheck() -> bool:
         log.warning("未设置 PLAYWRIGHT_BROWSERS_PATH，将使用 Playwright 默认目录")
 
     for directory in (settings.attachment_dir, settings.log_dir):
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-            log.info("目录可用：%s", directory)
-        except OSError as exc:
-            log.error("目录不可用：%s (%s)", directory, exc)
+        if directory.exists() and not directory.is_dir():
+            log.error("运行目录路径不是文件夹")
             ok = False
+        elif not directory.exists():
+            log.info("运行目录尚未创建；doctor 不创建目录")
 
     if settings.database_file.exists():
         log.info("数据库存在：%s", settings.database_file)
         try:
+            from backup import inspect_database
+
+            version = inspect_database(settings.database_file)
+            log.info("数据库 schema 版本=%d", version)
             health = get_task_health()
             if health["latest"]:
                 log.info(
@@ -69,6 +88,7 @@ def run_healthcheck() -> bool:
                 log.info("尚无每日任务健康记录")
         except Exception as exc:
             log.warning("无法读取任务健康记录；错误类型=%s", type(exc).__name__)
+            ok = False
     else:
         log.info("数据库将在首次运行时创建：%s", settings.database_file)
 

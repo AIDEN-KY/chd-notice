@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
@@ -87,7 +88,10 @@ def main() -> None:
         "command",
         choices=[
             "doctor",
+            "init-db",
             "preview",
+            "backup",
+            "restore",
             "diagnose-api",
             "diagnose-pagination",
             "init-auth",
@@ -102,6 +106,8 @@ def main() -> None:
         help="配置检查 / 初始化登录 / 立即抓取 / 完整日报 / 仅发送全部待发通知 / 启动定时器",
     )
     parser.add_argument("--notice-id", type=int, help="send-test 指定数据库通知 ID")
+    parser.add_argument("--output", type=Path, help="backup/restore 的新目标文件")
+    parser.add_argument("--input", type=Path, help="restore 的本地备份文件")
     parser.add_argument(
         "--action",
         choices=[
@@ -122,6 +128,13 @@ def main() -> None:
     parser.add_argument("--batch-id", type=int, help="deliveries 核对批次 ID")
     parser.add_argument("--reason", help="deliveries 人工核对依据（不要填敏感信息）")
     args = parser.parse_args()
+    if args.command not in {"backup", "restore"} and (args.output or args.input):
+        parser.error("--input/--output 仅用于 backup/restore")
+    if args.command in {"backup", "restore"}:
+        if not args.output or (args.command == "restore" and not args.input):
+            parser.error("必须指定目标；restore 还须指定 --input")
+        if args.command == "backup" and args.input:
+            parser.error("backup 使用当前数据库，不接受 --input")
     if args.notice_id is not None and args.command != "send-test":
         parser.error("--notice-id 仅用于 send-test")
     if args.command not in {"users", "deliveries"} and any(
@@ -155,7 +168,30 @@ def main() -> None:
     if args.command == "preview":
         print(json.dumps(get_delivery_preview(), ensure_ascii=False, indent=2))
         return
+    if args.command in {"backup", "restore"}:
+        from backup import copy_database
+
+        try:
+            if args.output.resolve() == settings.database_file.resolve():
+                raise ValueError("不允许覆盖运行数据库")
+            result = copy_database(
+                settings.database_file if args.command == "backup" else args.input, args.output
+            )
+        except (ValueError, OSError) as exc:
+            parser.error(f"备份/恢复未完成；错误类型={type(exc).__name__}")
+        except Exception as exc:
+            parser.error(f"备份/恢复未完成；错误类型={type(exc).__name__}")
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    if args.command == "doctor":
+        logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()], force=True)
+        raise SystemExit(0 if run_healthcheck() else 1)
     configure_logging()
+    if args.command == "init-db":
+        with task_lock(settings.database_file.with_suffix(".task.lock")):
+            init_db()
+        print("数据库初始化/增量迁移完成；本命令不抓取、不发送邮件")
+        return
     if args.command != "send-test":
         init_db()
     if args.command == "deliveries":
@@ -229,7 +265,10 @@ def main() -> None:
     elif args.command == "send-pending":
         asyncio.run(send_pending_today())
     elif args.command == "send-test":
-        from tests.manual_email.sender import send_test_email
+        try:
+            from tests.manual_email.sender import send_test_email
+        except ModuleNotFoundError:
+            parser.error("管理员测试工具未部署；请保留 tests/manual_email 目录")
 
         with task_lock(settings.database_file.with_suffix(".task.lock")):
             asyncio.run(send_test_email(args.notice_id))

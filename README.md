@@ -320,3 +320,22 @@ AI 关闭/排除策略继续优先，不外发正文；日志仅记录原因和�
 
 修复后重跑 `main.py scrape` 可重新处理遇到的失败通知；补偿队列也会有限重试。
 这不是对门户连接中断的修复，真实附件是否恢复需用户手动抓取验收。
+
+### 备份、只读诊断与 Windows 运维
+
+`doctor` 不再初始化或迁移数据库，不创建下载/日志目录；只检查配置和本地条件。
+`init-db` 用于明确初始化/增量迁移，升级前先备份；schema 版本独立记录为 1，
+拒绝对未来版本降级。非法邮箱、调度时间、端口、重试次数及并发范围会被拒绝，
+敏感配置错误不显示填写值。
+
+```powershell
+.\.venv\Scripts\python.exe main.py backup --output "snapshot-unique-name.db"
+.\.venv\Scripts\python.exe main.py restore --input "snapshot-unique-name.db" --output "rehearsal-unique-name.db"
+```
+
+备份含个人数据，只选本地受保护目录。目标父目录须存在，目标文件不得存在；
+restore 只做新文件恢复演练，不覆盖运行数据库，不发送邮件。复制使用 SQLite 在线备份 API，
+包含已提交 WAL 数据，验证完整性和 schema；保留 accepted/unknown 投递事实。
+Windows NTFS 权限、每天 21:00 任务计划、关机/睡眠补跑边界及实际回切注意事项见
+[运维说明](docs/operations.md)。CI 已配置 Ubuntu/Windows 和 Python 3.11/3.13 矩阵，
+含格式检查；远端 CI 结果需要另行核验。恢复演练不等于正式回切验收。

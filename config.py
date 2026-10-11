@@ -12,6 +12,8 @@ def _env(name: str, default: str | None = None) -> str:
     value = os.getenv(name, default)
     if value is None or not value.strip():
         raise RuntimeError(f"缺少环境变量：{name}")
+    if "\r" in value or "\n" in value:
+        raise RuntimeError(f"{name} 不得包含换行符")
     return value.strip()
 
 
@@ -91,7 +93,7 @@ class Settings:
         default_factory=lambda: _positive_int_env("TASK_TIME_BUDGET_SECONDS", 900)
     )
     summary_concurrency: int = field(
-        default_factory=lambda: min(_positive_int_env("SUMMARY_CONCURRENCY", 2), 8)
+        default_factory=lambda: _positive_int_env("SUMMARY_CONCURRENCY", 2)
     )
     summary_min_chars: int = 50
     summary_max_chars: int = 400
@@ -105,6 +107,54 @@ class Settings:
     smtp_port: int = 465
     # 授权范围及上线验收未完成前不得开放正式多人发送；不提供环境变量绕过。
     multi_user_delivery_ready: bool = False
+
+    def __post_init__(self) -> None:
+        ranges = {
+            "schedule_hour": (0, 23),
+            "schedule_minute": (0, 59),
+            "smtp_port": (1, 65535),
+            "summary_concurrency": (1, 8),
+            "retry_attempts": (1, 10),
+        }
+        for name, (minimum, maximum) in ranges.items():
+            value = getattr(self, name)
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ValueError(f"{name} 超出允许范围")
+        for name in (
+            "task_time_budget_seconds",
+            "navigation_timeout_ms",
+            "action_timeout_ms",
+            "spa_load_timeout_ms",
+            "max_notices_per_digest",
+            "max_digest_messages_per_day",
+            "max_message_bytes",
+            "max_single_attachment_bytes",
+            "max_pages_to_scrape",
+            "max_attachment_bytes",
+            "known_pages_to_stop",
+            "history_pages_per_run",
+            "list_page_size",
+            "alert_cooldown_seconds",
+            "summary_min_chars",
+            "summary_max_chars",
+        ):
+            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
+                raise ValueError(f"{name} 必须为正整数")
+        if type(self.retry_backoff_seconds) is not int or self.retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds 必须为非负整数")
+        if self.summary_min_chars > self.summary_max_chars:
+            raise ValueError("摘要长度上下限无效")
+        for name in ("login_url", "notices_url", "list_api_url", "deepseek_url"):
+            from urllib.parse import urlparse
+
+            parsed = urlparse(getattr(self, name))
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+            ):
+                raise ValueError(f"{name} 必须为不含凭证的 HTTPS URL")
 
     # 多个候选选择器用 || 分隔，可在 .env 中覆盖。
     list_item_selectors: list[str] = field(

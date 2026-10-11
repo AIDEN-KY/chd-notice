@@ -95,7 +95,12 @@ def test_doctor_allows_disabled_ai_without_api_key(tmp_path, monkeypatch, caplog
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
     for name in ("QQ_EMAIL", "QQ_SMTP_AUTH_CODE", "MY_EMAIL"):
-        monkeypatch.setenv(name, "fake-sensitive-value")
+        monkeypatch.setenv(
+            name,
+            "fake-sensitive-value"
+            if name == "QQ_SMTP_AUTH_CODE"
+            else "fake-sensitive-value@example.test",
+        )
     assert healthcheck.run_healthcheck()
     assert "fake-sensitive-value" not in caplog.text
 
