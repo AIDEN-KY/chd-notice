@@ -8,6 +8,41 @@ import pytest
 import db
 
 
+@pytest.mark.parametrize("pause_consent", ["", "new-consent-on-invalid-transition"])
+def test_unsubscribe_cannot_be_bypassed_via_pause_then_resume(tmp_path, monkeypatch, pause_consent):
+    """退订是撤回同意，不得经暂停状态洗掉重新订阅的同意要求。"""
+    monkeypatch.setattr(
+        db,
+        "settings",
+        SimpleNamespace(database_file=tmp_path / "notices.db", timezone=ZoneInfo("Asia/Shanghai")),
+    )
+    db.init_db()
+    user_id = db.add_user("student@example.test", consent_source="original-consent")
+    db.set_user_status(user_id, "unsubscribed")
+    before = db.get_users()[0]
+
+    with pytest.raises(ValueError):
+        db.set_user_status(user_id, "paused", consent_source=pause_consent)
+        db.set_user_status(user_id, "active")
+
+    assert db.get_users()[0] == before, "非法状态转换不能覆盖退订或原同意记录"
+    assert db.get_active_users() == []
+    # 正常重新订阅仍然可用，只接受明确恢复动作上的新同意。
+    db.save_notice(
+        {
+            "title": "退订期间的通知",
+            "detail_url": "https://example.test/during-unsubscribe",
+            "content_html": "<p>历史正文</p>",
+            "attachments": [],
+        },
+        "during-unsubscribe-hash",
+    )
+    db.set_user_status(user_id, "active", consent_source="renewed-consent")
+    active = db.get_active_users()[0]
+    assert active["consent_source"] == "renewed-consent"
+    assert active["start_after_notice_id"] == 1
+
+
 def test_users_migration_is_repeatable_and_preserves_existing_data(tmp_path, monkeypatch):
     monkeypatch.setattr(
         db,

@@ -448,6 +448,8 @@ def set_user_status(user_id: int, status: str, *, consent_source: str = "") -> N
         user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         if user is None:
             raise ValueError("用户 ID 不存在")
+        if user["status"] == "unsubscribed" and status == "paused":
+            raise ValueError("已退订用户不能改为暂停；重新订阅需要新的同意来源")
         if status == "active" and user["status"] == "unsubscribed":
             if not consent_source.strip():
                 raise ValueError("重新订阅需要新的同意来源")
