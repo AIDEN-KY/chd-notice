@@ -162,6 +162,9 @@ def test_attachment_download_rejects_login_redirects(
         ),
     )
     context = SimpleNamespace(request=SimpleNamespace(get=get))
+    from tests.fake_attachment_transport import install_fake_attachment_transport
+
+    install_fake_attachment_transport(monkeypatch, scraper, context, get)
     coroutine = scraper._download_attachment(context, original_url, "report.html")
     try:
         coroutine.send(None)
@@ -214,6 +217,9 @@ def test_attachment_update_preserves_previous_file(tmp_path, monkeypatch, fail_p
         ),
     )
     context = SimpleNamespace(request=SimpleNamespace(get=get))
+    from tests.fake_attachment_transport import install_fake_attachment_transport
+
+    install_fake_attachment_transport(monkeypatch, scraper, context, get)
 
     def download():
         coroutine = scraper._download_attachment(context, original_url, "report.pdf")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urljoin, urlparse
 
+import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import (
     BrowserContext,
@@ -333,40 +335,118 @@ def _safe_filename(name: str, url: str) -> str:
     return f"{path.stem}_{suffix}{path.suffix}"
 
 
-async def _download_attachment(context: BrowserContext, url: str, name: str) -> dict:
-    item = {"name": name, "url": url, "path": "", "size": 0}
+def _validate_attachment_url(url: str) -> None:
+    parsed = urlparse(url)
+    allowed = getattr(settings, "attachment_allowed_hosts", ("portal.chd.edu.cn",))
     try:
-        response = await context.request.get(url, timeout=settings.action_timeout_ms)
-        if not response.ok:
-            raise RuntimeError(f"HTTP {response.status}")
-        response_url = urlparse(response.url)
-        login_url = urlparse(settings.login_url)
-        if response_url.hostname == login_url.hostname or response_url.path.rstrip(
-            "/"
-        ) == login_url.path.rstrip("/"):
-            raise SessionExpiredError("附件请求返回登录页，会话可能已过期")
-        body = await response.body()
-        content_hash = hashlib.sha256(body).hexdigest()
-        settings.attachment_dir.mkdir(parents=True, exist_ok=True)
-        filename = Path(_safe_filename(name, url))
-        target = settings.attachment_dir / f"{filename.stem}_{content_hash}{filename.suffix}"
-        # 内容寻址保留旧版本；同目录临时文件确保替换不会跨文件系统。
-        temporary_path = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                dir=settings.attachment_dir, prefix=".attachment-", suffix=".tmp", delete=False
-            ) as temporary:
-                temporary_path = Path(temporary.name)
-                temporary.write(body)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.replace(temporary_path, target)
-        finally:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
-        item.update(path=str(target.resolve()), size=len(body), sha256=content_hash)
+        ipaddress.ip_address(parsed.hostname or "")
+    except ValueError:
+        pass
+    else:
+        raise ValueError("附件不允许直接使用 IP 地址目标")
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.hostname.lower() not in allowed
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+    ):
+        raise ValueError("附件目标不在 HTTPS 可信主机范围内")
+
+
+def _looks_like_cas_login(prefix: bytes) -> bool:
+    text = prefix.decode("utf-8", errors="ignore").lower()
+    return (
+        "<form" in text
+        and "password" in text
+        and any(marker in text for marker in ("authserver", "cas login", "统一身份认证"))
+    )
+
+
+async def _download_attachment(context: BrowserContext, url: str, name: str) -> dict:
+    """独立流式传输：复用浏览器匹配 URL 的 Cookie，不使用已缓冲的 APIResponse.body。"""
+    item = {"name": name, "url": url, "path": "", "size": 0}
+    temporary_path = None
+    try:
+        limit = getattr(settings, "max_single_attachment_bytes", 20 * 1024 * 1024)
+        if limit <= 0:
+            raise ValueError("单文件大小预算必须大于零")
+        current = url
+        redirects = getattr(settings, "max_attachment_redirects", 3)
+        _validate_attachment_url(current)
+        async with httpx.AsyncClient(
+            timeout=settings.action_timeout_ms / 1000, follow_redirects=False, trust_env=False
+        ) as client:
+            for hop in range(redirects + 1):
+                _validate_attachment_url(current)
+                cookies = await context.cookies([current])
+                # 每跳只发送 Playwright 为当前地址选择的 Cookie，不跨主机沿用。
+                client.cookies.clear()
+                for cookie in cookies:
+                    client.cookies.set(
+                        cookie["name"],
+                        cookie["value"],
+                        domain=cookie["domain"],
+                        path=cookie["path"],
+                    )
+                async with client.stream(
+                    "GET", current, headers={"Accept-Encoding": "identity"}
+                ) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        if hop == redirects or not response.headers.get("location"):
+                            raise ValueError("附件重定向超限或缺少目标")
+                        current = urljoin(current, response.headers["location"])
+                        _validate_attachment_url(current)
+                        continue
+                    response.raise_for_status()
+                    if response.headers.get("content-encoding", "identity").lower() not in {
+                        "identity",
+                        "",
+                    }:
+                        raise ValueError("附件响应忽略 identity 编码要求，不能保证解压内存预算")
+                    _validate_attachment_url(str(response.url))
+                    login = urlparse(settings.login_url)
+                    if urlparse(str(response.url)).path.rstrip("/") == login.path.rstrip("/"):
+                        raise SessionExpiredError("附件返回登录页")
+                    length = response.headers.get("content-length")
+                    if length is not None and (int(length) < 0 or int(length) > limit):
+                        raise ValueError("附件声明大小超过预算")
+                    settings.attachment_dir.mkdir(parents=True, exist_ok=True)
+                    hasher = hashlib.sha256()
+                    size = 0
+                    prefix = bytearray()
+                    with tempfile.NamedTemporaryFile(
+                        dir=settings.attachment_dir,
+                        prefix=".attachment-",
+                        suffix=".tmp",
+                        delete=False,
+                    ) as temporary:
+                        temporary_path = Path(temporary.name)
+                        async for chunk in response.aiter_raw(chunk_size=64 * 1024):
+                            size += len(chunk)
+                            if size > limit:
+                                raise ValueError("附件实际大小超过预算")
+                            prefix.extend(chunk[: max(0, 64 * 1024 - len(prefix))])
+                            hasher.update(chunk)
+                            temporary.write(chunk)
+                        temporary.flush()
+                        os.fsync(temporary.fileno())
+                    if _looks_like_cas_login(bytes(prefix)):
+                        raise SessionExpiredError("附件内容为 CAS 登录表单")
+                    content_hash = hasher.hexdigest()
+                    filename = Path(_safe_filename(name, url))
+                    target = (
+                        settings.attachment_dir / f"{filename.stem}_{content_hash}{filename.suffix}"
+                    )
+                    os.replace(temporary_path, target)
+                    item.update(path=str(target.resolve()), size=size, sha256=content_hash)
+                    break
     except Exception as exc:
-        log.warning("附件下载失败，将仅保留链接：%s (%s)", url, exc)
+        log.warning("附件下载失败，仅保留原链接；错误类型=%s", type(exc).__name__)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     return item
 
 
@@ -955,26 +1035,58 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
                     "已达到 %d 页安全上限，本次抓取停止；不代表已遍历全部历史通知",
                     settings.max_pages_to_scrape,
                 )
-            await context.storage_state(path=settings.auth_file)
+            await _save_auth_state_atomic(context)
         finally:
             await context.close()
             await browser.close()
     return stats
 
 
+async def _save_auth_state_atomic(context: BrowserContext) -> None:
+    """先完整获取状态，再同目录写入并原子替换；失败不覆盖旧会话。"""
+    state = await context.storage_state()
+    if (
+        not isinstance(state, dict)
+        or not isinstance(state.get("cookies"), list)
+        or not isinstance(state.get("origins"), list)
+    ):
+        raise ValueError("浏览器返回了无效的登录状态")
+    payload = json.dumps(state, ensure_ascii=False)
+    target = settings.auth_file
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".auth-", suffix=".tmp", dir=target.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, target)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 async def initialize_auth() -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
-        await _goto_with_retry(page, settings.notices_url)
-        print("请在打开的浏览器中完成 CAS 登录，并确认已进入通知页面。")
-        await asyncio.to_thread(input, "完成后回到终端按 Enter 保存会话：")
-        if await _is_login_page(page):
-            await context.close()
-            await browser.close()
-            raise RuntimeError("仍停留在登录页，未保存会话")
-        await context.storage_state(path=settings.auth_file)
-        await context.close()
-        await browser.close()
+        context = None
+        try:
+            context = await browser.new_context()
+            page = await context.new_page()
+            await _goto_with_retry(page, settings.notices_url)
+            print("请在打开的浏览器中完成 CAS 登录，并确认已进入通知页面。")
+            await asyncio.to_thread(input, "完成后回到终端按 Enter 保存会话：")
+            if await _is_login_page(page):
+                raise RuntimeError("仍停留在登录页，未保存会话")
+            if not await _wait_for_list(
+                page, timeout_ms=getattr(settings, "spa_load_timeout_ms", 30000)
+            ):
+                raise RuntimeError("未验证到通知列表，未保存会话；请确认登录和选择器")
+            await _save_auth_state_atomic(context)
+        finally:
+            try:
+                if context is not None:
+                    await context.close()
+            finally:
+                await browser.close()
         print(f"会话已保存到 {settings.auth_file}")

@@ -20,6 +20,27 @@ def _selectors(env_name: str, defaults: list[str]) -> list[str]:
     return [item.strip() for item in value.split("||") if item.strip()] if value else defaults
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        raise ValueError(f"{name} 必须为正整数") from None
+
+
+def _attachment_hosts() -> tuple[str, ...]:
+    hosts = tuple(
+        h.strip().lower()
+        for h in os.getenv("ATTACHMENT_ALLOWED_HOSTS", "portal.chd.edu.cn").split("||")
+        if h.strip()
+    )
+    if not hosts or any("/" in h or ":" in h or "*" in h for h in hosts):
+        raise ValueError("ATTACHMENT_ALLOWED_HOSTS 必须是精确主机名，以 || 分隔")
+    return hosts
+
+
 @dataclass(frozen=True)
 class Settings:
     login_url: str = "https://ids.chd.edu.cn/authserver/login"
@@ -44,13 +65,25 @@ class Settings:
     navigation_timeout_ms: int = 60_000
     retry_attempts: int = 3
     retry_backoff_seconds: int = 3
+    alert_cooldown_seconds: int = 3600
     max_attachment_bytes: int = 20 * 1024 * 1024
+    max_single_attachment_bytes: int = field(
+        default_factory=lambda: _positive_int_env("MAX_SINGLE_ATTACHMENT_BYTES", 20 * 1024 * 1024)
+    )
+    # 本项目的保守邮件预算，不代表 QQ 服务端公布的上限。
+    max_message_bytes: int = field(
+        default_factory=lambda: _positive_int_env("MAX_MESSAGE_BYTES", 20 * 1024 * 1024)
+    )
+    attachment_allowed_hosts: tuple[str, ...] = field(default_factory=_attachment_hosts)
+    max_attachment_redirects: int = 3
     schedule_hour: int = 21
     schedule_minute: int = 0
     deepseek_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-chat"
     smtp_host: str = "smtp.qq.com"
     smtp_port: int = 465
+    # 授权范围及上线验收未完成前不得开放正式多人发送；不提供环境变量绕过。
+    multi_user_delivery_ready: bool = False
 
     # 多个候选选择器用 || 分隔，可在 .env 中覆盖。
     list_item_selectors: list[str] = field(
@@ -124,6 +157,21 @@ class Settings:
     scroll_container_selectors: list[str] = field(
         default_factory=lambda: _selectors("SCROLL_CONTAINER_SELECTORS", ["#app"])
     )
+
+    @property
+    def ai_summary_enabled(self) -> bool:
+        value = os.getenv("AI_SUMMARY_ENABLED", "true").strip().lower()
+        if value not in {"true", "false", "1", "0"}:
+            raise ValueError("AI_SUMMARY_ENABLED 必须为 true/false/1/0")
+        return value in {"true", "1"}
+
+    @property
+    def ai_excluded_keywords(self) -> tuple[str, ...]:
+        value = os.getenv("AI_EXCLUDED_KEYWORDS", "内部资料||禁止转发||保密||不得外传")
+        keywords = tuple(item.strip() for item in value.split("||") if item.strip())
+        if not keywords:
+            raise ValueError("AI_EXCLUDED_KEYWORDS 不能为空；多个标记用 || 分隔")
+        return keywords
 
     @property
     def deepseek_api_key(self) -> str:

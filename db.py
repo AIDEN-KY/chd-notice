@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -14,6 +16,85 @@ NoticeSaveStatus = Literal["new", "updated", "unchanged", "baseline"]
 log = logging.getLogger(__name__)
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS task_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    scrape_succeeded INTEGER NOT NULL DEFAULT 0,
+    delivered_count INTEGER NOT NULL DEFAULT 0,
+    error_type TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS admin_alerts (
+    alert_key TEXT PRIMARY KEY,
+    attempted_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    error_type TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS delivery_resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS digest_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_key TEXT NOT NULL UNIQUE,
+    message_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_error TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS batch_notices (
+    batch_id INTEGER NOT NULL,
+    notice_id INTEGER NOT NULL,
+    revision_count INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    PRIMARY KEY (batch_id, notice_id)
+);
+CREATE TABLE IF NOT EXISTS batch_recipients (
+    batch_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    smtp_code INTEGER,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (batch_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS user_notice_deliveries (
+    user_id INTEGER NOT NULL,
+    notice_id INTEGER NOT NULL,
+    revision_count INTEGER NOT NULL,
+    batch_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    PRIMARY KEY (user_id, notice_id, revision_count)
+);
+CREATE TABLE IF NOT EXISTS history_authorizations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    email_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'unsubscribed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    subscribed_at TEXT NOT NULL,
+    consent_source TEXT NOT NULL,
+    start_after_notice_id INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS notices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -109,6 +190,109 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mail_deliveries_status "
             "ON mail_deliveries(status, updated_at)"
+        )
+
+
+def validate_email(email: str) -> str:
+    """单个 ASCII 邮箱；保留 local-part 大小写，不合并别名。"""
+    if not isinstance(email, str) or any(ord(char) < 32 or ord(char) > 126 for char in email):
+        raise ValueError("邮箱必须是单个合法 ASCII 地址")
+    email = email.strip()
+    if len(email) > 254 or email.count("@") != 1:
+        raise ValueError("邮箱格式无效")
+    local, domain = email.split("@")
+    if (
+        not local
+        or len(local) > 64
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+        or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local)
+        or "." not in domain
+        or len(domain) > 253
+        or any(
+            not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in domain.split(".")
+        )
+    ):
+        raise ValueError("邮箱格式无效")
+    return f"{local}@{domain.lower()}"
+
+
+def add_user(email: str, *, consent_source: str) -> int:
+    address = validate_email(email)
+    if not consent_source.strip():
+        raise ValueError("必须记录订阅同意来源")
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    with connect() as conn:
+        existing = conn.execute("SELECT id FROM users WHERE email_key = ?", (address,)).fetchone()
+        if existing:
+            return int(existing["id"])
+        start_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notices").fetchone()[0]
+        cursor = conn.execute(
+            "INSERT INTO users (email, email_key, created_at, updated_at, subscribed_at, consent_source, start_after_notice_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (address, address, now, now, now, consent_source.strip(), start_id),
+        )
+        return int(cursor.lastrowid)
+
+
+def get_users() -> list[dict]:
+    with connect() as conn:
+        return [dict(row) for row in conn.execute("SELECT * FROM users ORDER BY id")]
+
+
+def get_active_users() -> list[dict]:
+    with connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute("SELECT * FROM users WHERE status = 'active' ORDER BY id")
+        ]
+
+
+def authorize_history(user_id: int, *, reason: str) -> None:
+    """显式授权历史补发，不重置已接受、明确拒收及未知投递事实。"""
+    if not reason.strip():
+        raise ValueError("历史补发必须记录明确授权原因")
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    with connect() as conn:
+        user = conn.execute("SELECT status FROM users WHERE id=?", (user_id,)).fetchone()
+        if not user or user["status"] != "active":
+            raise ValueError("历史补发仅允许启用的用户")
+        conn.execute(
+            "INSERT INTO history_authorizations (user_id,reason,created_at) VALUES (?,?,?)",
+            (user_id, reason.strip(), now),
+        )
+        conn.execute(
+            "UPDATE users SET start_after_notice_id=0,updated_at=? WHERE id=?", (now, user_id)
+        )
+        conn.execute(
+            "UPDATE batch_recipients SET status='pending',updated_at=? WHERE user_id=? AND status='skipped'",
+            (now, user_id),
+        )
+        conn.execute(
+            "UPDATE user_notice_deliveries SET status='pending' WHERE user_id=? AND status='skipped'",
+            (user_id,),
+        )
+
+
+def set_user_status(user_id: int, status: str, *, consent_source: str = "") -> None:
+    if status not in {"active", "paused", "unsubscribed"}:
+        raise ValueError("订阅状态无效")
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    with connect() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if user is None:
+            raise ValueError("用户 ID 不存在")
+        if status == "active" and user["status"] == "unsubscribed":
+            if not consent_source.strip():
+                raise ValueError("重新订阅需要新的同意来源")
+            start_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notices").fetchone()[0]
+            conn.execute(
+                "UPDATE users SET subscribed_at = ?, consent_source = ?, start_after_notice_id = ? WHERE id = ?",
+                (now, consent_source.strip(), start_id, user_id),
+            )
+        conn.execute(
+            "UPDATE users SET status = ?, updated_at = ? WHERE id = ?", (status, now, user_id)
         )
 
 
@@ -332,3 +516,363 @@ def get_delivery(message_key: str) -> dict | None:
             (message_key,),
         ).fetchone()
     return None if row is None else dict(row)
+
+
+def claim_admin_alert(alert_key: str, cooldown_seconds: int) -> bool:
+    now = datetime.now(settings.timezone)
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT attempted_at FROM admin_alerts WHERE alert_key=?", (alert_key,)
+        ).fetchone()
+        if row and (now - datetime.fromisoformat(row[0])).total_seconds() < cooldown_seconds:
+            return False
+        conn.execute(
+            "INSERT INTO admin_alerts (alert_key,attempted_at,status) VALUES (?,?,'sending') "
+            "ON CONFLICT(alert_key) DO UPDATE SET attempted_at=excluded.attempted_at,status='sending',attempts=admin_alerts.attempts+1,error_type=''",
+            (alert_key, now.isoformat(timespec="seconds")),
+        )
+        return True
+
+
+def finish_admin_alert(alert_key: str, error_type: str = "") -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE admin_alerts SET status=?,error_type=? WHERE alert_key=?",
+            ("failed" if error_type else "sent", error_type, alert_key),
+        )
+
+
+def start_task_run() -> int:
+    """调用者持有任务锁；旧 running 表示进程中断，不伪造正常结束。"""
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE task_runs SET status='interrupted',finished_at=?,error_type='InterruptedTask' WHERE status='running'",
+            (now,),
+        )
+        return conn.execute("INSERT INTO task_runs (started_at) VALUES (?)", (now,)).lastrowid
+
+
+def finish_task_run(
+    run_id: int,
+    *,
+    status: str,
+    scrape_succeeded: bool,
+    delivered_count: int = 0,
+    error_type: str = "",
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE task_runs SET finished_at=?,status=?,scrape_succeeded=?,delivered_count=?,error_type=? WHERE id=?",
+            (
+                datetime.now(settings.timezone).isoformat(timespec="seconds"),
+                status,
+                int(scrape_succeeded),
+                delivered_count,
+                error_type,
+                run_id,
+            ),
+        )
+
+
+def get_task_health() -> dict:
+    with connect() as conn:
+        latest = conn.execute("SELECT * FROM task_runs ORDER BY id DESC LIMIT 1").fetchone()
+        successful = conn.execute(
+            "SELECT finished_at FROM task_runs WHERE scrape_succeeded=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return {
+        "latest": dict(latest) if latest else None,
+        "last_successful_scrape_at": successful[0] if successful else None,
+    }
+
+
+def prepare_recipient_batches(users: list[dict]) -> None:
+    """逐用户/修订建立稳定快照；不依赖旧版全局 sent。"""
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        notices = [_row_to_notice(row) for row in conn.execute("SELECT * FROM notices ORDER BY id")]
+        groups: dict[tuple, tuple[list[dict], list[dict]]] = {}
+        for user in users:
+            pending = [
+                notice
+                for notice in notices
+                if notice["id"] > user["start_after_notice_id"]
+                and not conn.execute(
+                    "SELECT 1 FROM user_notice_deliveries WHERE user_id=? AND notice_id=? AND revision_count=?",
+                    (user["id"], notice["id"], notice["revision_count"]),
+                ).fetchone()
+            ]
+            if not pending:
+                continue
+            fingerprint = tuple((n["id"], n["revision_count"], n["content_hash"]) for n in pending)
+            groups.setdefault(fingerprint, (pending, []))[1].append(user)
+        for fingerprint, (pending, recipients) in groups.items():
+            # 最多 20 个 BCC 地址；收件人与通知版本共同决定批次身份。
+            for offset in range(0, len(recipients), 20):
+                subset = recipients[offset : offset + 20]
+                key = hashlib.sha256(
+                    json.dumps([fingerprint, [u["id"] for u in subset]], sort_keys=True).encode()
+                ).hexdigest()
+                cursor = conn.execute(
+                    "INSERT INTO digest_batches (message_key,message_id,created_at,updated_at) VALUES (?,?,?,?)",
+                    (key, f"<chd-batch-{key}@chd-notice.local>", now, now),
+                )
+                batch_id = cursor.lastrowid
+                for notice in pending:
+                    conn.execute(
+                        "INSERT INTO batch_notices VALUES (?,?,?,?,?)",
+                        (
+                            batch_id,
+                            notice["id"],
+                            notice["revision_count"],
+                            notice["content_hash"],
+                            json.dumps(notice, ensure_ascii=False),
+                        ),
+                    )
+                for user in subset:
+                    conn.execute(
+                        "INSERT INTO batch_recipients (batch_id,user_id,email,updated_at) VALUES (?,?,?,?)",
+                        (batch_id, user["id"], user["email"], now),
+                    )
+                    for notice in pending:
+                        conn.execute(
+                            "INSERT INTO user_notice_deliveries (user_id,notice_id,revision_count,batch_id) VALUES (?,?,?,?)",
+                            (user["id"], notice["id"], notice["revision_count"], batch_id),
+                        )
+
+
+def get_retryable_batches() -> list[dict]:
+    with connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT DISTINCT b.* FROM digest_batches b JOIN batch_recipients r ON r.batch_id=b.id "
+                "WHERE r.status IN ('pending','refused') AND r.attempts < 3 ORDER BY b.id"
+            )
+        ]
+
+
+def get_batch_notices(batch_id: int) -> list[dict]:
+    with connect() as conn:
+        return [
+            json.loads(row[0])
+            for row in conn.execute(
+                "SELECT snapshot_json FROM batch_notices WHERE batch_id=? ORDER BY notice_id",
+                (batch_id,),
+            )
+        ]
+
+
+def store_batch_summaries(batch_id: int, notices: list[dict]) -> None:
+    with connect() as conn:
+        conn.executemany(
+            "UPDATE batch_notices SET snapshot_json=? WHERE batch_id=? AND notice_id=?",
+            [(json.dumps(n, ensure_ascii=False), batch_id, n["id"]) for n in notices],
+        )
+
+
+def claim_batch_recipients(batch_id: int) -> list[dict]:
+    """发送前复核订阅并领取；崩溃后的 sending 不自动再次发送。"""
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT * FROM batch_recipients WHERE batch_id=? AND status IN ('pending','refused') AND attempts < 3 ORDER BY user_id",
+            (batch_id,),
+        ).fetchall()
+        recipients = []
+        minimum_id = conn.execute(
+            "SELECT MIN(notice_id) FROM batch_notices WHERE batch_id=?", (batch_id,)
+        ).fetchone()[0]
+        for row in rows:
+            user = conn.execute("SELECT * FROM users WHERE id=?", (row["user_id"],)).fetchone()
+            eligible = (
+                user
+                and user["status"] == "active"
+                and user["email"] == row["email"]
+                and user["start_after_notice_id"] < minimum_id
+            )
+            if eligible:
+                recipients.append(dict(row))
+            status = "sending" if eligible else "skipped"
+            conn.execute(
+                "UPDATE batch_recipients SET status=?,attempts=attempts+?,updated_at=? WHERE batch_id=? AND user_id=?",
+                (status, int(bool(eligible)), now, batch_id, row["user_id"]),
+            )
+            conn.execute(
+                "UPDATE user_notice_deliveries SET status=? WHERE batch_id=? AND user_id=?",
+                (status, batch_id, row["user_id"]),
+            )
+        if rows:
+            states = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT status FROM batch_recipients WHERE batch_id=?", (batch_id,)
+                )
+            }
+            status = (
+                "sending"
+                if "sending" in states
+                else "skipped"
+                if states == {"skipped"}
+                else "partial"
+            )
+            conn.execute(
+                "UPDATE digest_batches SET status=?,updated_at=? WHERE id=?",
+                (status, now, batch_id),
+            )
+        return recipients
+
+
+def recover_interrupted_batches() -> int:
+    """调用者必须持有任务锁。进程中断无法证明 SMTP 没有接受邮件。"""
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT batch_id,user_id FROM batch_recipients WHERE status='sending'"
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE batch_recipients SET status='unknown',last_error='InterruptedTask',updated_at=? WHERE batch_id=? AND user_id=?",
+                (now, row["batch_id"], row["user_id"]),
+            )
+            conn.execute(
+                "UPDATE user_notice_deliveries SET status='unknown' WHERE batch_id=? AND user_id=?",
+                (row["batch_id"], row["user_id"]),
+            )
+            conn.execute(
+                "UPDATE digest_batches SET status='unknown',last_error='InterruptedTask',updated_at=? WHERE id=?",
+                (now, row["batch_id"]),
+            )
+        return len(rows)
+
+
+def get_unknown_recipients() -> list[dict]:
+    with connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT batch_id,user_id,attempts,last_error FROM batch_recipients WHERE status='unknown' ORDER BY batch_id,user_id"
+            )
+        ]
+
+
+def resolve_unknown_delivery(batch_id: int, user_id: int, *, decision: str, reason: str) -> None:
+    """管理员核对后显式确认或授权一次有限重试，保留尝试次数和审计。"""
+    if decision not in {"confirm", "retry"} or not reason.strip():
+        raise ValueError("必须指定 confirm/retry 和核对原因")
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM batch_recipients WHERE batch_id=? AND user_id=?", (batch_id, user_id)
+        ).fetchone()
+        if row is None or row["status"] != "unknown":
+            raise ValueError("只能处理投递结果未知的收件人")
+        if decision == "retry" and row["attempts"] >= 3:
+            raise ValueError("已达到三次尝试上限，不能自动补发")
+        conn.execute(
+            "INSERT INTO delivery_resolutions (batch_id,user_id,decision,reason,created_at) VALUES (?,?,?,?,?)",
+            (batch_id, user_id, decision, reason.strip(), now),
+        )
+        if decision == "confirm":
+            # 使用同一个连接事务，复用修订确认逻辑，不能确认之后产生的新修订。
+            _record_recipient_result(
+                conn,
+                batch_id,
+                [dict(row)],
+                {"accepted": [row["email"]], "refused": {}},
+                error="AdministratorConfirmed",
+            )
+        else:
+            conn.execute(
+                "UPDATE batch_recipients SET status='pending',last_error='AdministratorRetry',updated_at=? WHERE batch_id=? AND user_id=?",
+                (now, batch_id, user_id),
+            )
+            conn.execute(
+                "UPDATE user_notice_deliveries SET status='pending' WHERE batch_id=? AND user_id=?",
+                (batch_id, user_id),
+            )
+            conn.execute(
+                "UPDATE digest_batches SET status=CASE WHEN EXISTS (SELECT 1 FROM batch_recipients WHERE batch_id=digest_batches.id AND status='unknown') THEN 'unknown' ELSE 'pending' END,updated_at=? WHERE id=?",
+                (now, batch_id),
+            )
+
+
+def record_recipient_result(
+    batch_id: int, recipients: list[dict], result: dict | None, *, error: str = ""
+) -> None:
+    with connect() as conn:
+        _record_recipient_result(conn, batch_id, recipients, result, error=error)
+
+
+def _record_recipient_result(conn, batch_id, recipients, result, *, error=""):
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    for recipient in recipients:
+        address = recipient["email"]
+        code = None
+        if result is None:
+            status = "unknown"
+        elif address in result["accepted"]:
+            status = "accepted"
+        else:
+            code = int(result["refused"][address][0])
+            status = "refused" if 400 <= code < 500 else "permanent"
+        # 不保存 SMTP 原始回复，避免回复中包含同学邮箱或敏感信息。
+        conn.execute(
+            "UPDATE batch_recipients SET status=?,smtp_code=?,last_error=?,updated_at=? WHERE batch_id=? AND user_id=?",
+            (
+                status,
+                code,
+                error or (f"SMTP {code}" if code else ""),
+                now,
+                batch_id,
+                recipient["user_id"],
+            ),
+        )
+        conn.execute(
+            "UPDATE user_notice_deliveries SET status=? WHERE batch_id=? AND user_id=?",
+            (status, batch_id, recipient["user_id"]),
+        )
+    states = [
+        row[0]
+        for row in conn.execute("SELECT status FROM batch_recipients WHERE batch_id=?", (batch_id,))
+    ]
+    batch_status = (
+        "unknown"
+        if "unknown" in states
+        else (
+            "sent"
+            if all(s in {"accepted", "skipped"} for s in states)
+            else "partial"
+            if "accepted" in states
+            else "failed"
+        )
+    )
+    conn.execute(
+        "UPDATE digest_batches SET status=?,updated_at=?,last_error=? WHERE id=?",
+        (batch_status, now, error, batch_id),
+    )
+    # sent 仅兼容旧查看方式；多人选择永远用逐用户修订状态。
+    for snapshot in conn.execute(
+        "SELECT * FROM batch_notices WHERE batch_id=?", (batch_id,)
+    ).fetchall():
+        outstanding = conn.execute(
+            "SELECT 1 FROM users u WHERE u.status='active' AND u.start_after_notice_id < ? AND NOT EXISTS (SELECT 1 FROM user_notice_deliveries d WHERE d.user_id=u.id AND d.notice_id=? AND d.revision_count=? AND d.status='accepted') LIMIT 1",
+            (snapshot["notice_id"], snapshot["notice_id"], snapshot["revision_count"]),
+        ).fetchone()
+        if not outstanding:
+            conn.execute(
+                "UPDATE notices SET sent=1,sent_at=? WHERE id=? AND revision_count=? AND content_hash=?",
+                (
+                    now,
+                    snapshot["notice_id"],
+                    snapshot["revision_count"],
+                    snapshot["content_hash"],
+                ),
+            )

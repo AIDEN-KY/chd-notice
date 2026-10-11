@@ -12,6 +12,7 @@ __pycache__/
 .venv/
 pw-browsers/
 *.db
+*.task.lock
 
 # 本地联调工具，不属于生产版本
 diagnose.py
