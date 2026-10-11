@@ -80,9 +80,12 @@ def evaluate_pagination_page(
     return None, consecutive
 
 
-def notice_content_hash(notice: dict, *, include_attachment_hash: bool = True) -> str:
+def notice_content_hash(
+    notice: dict, *, include_attachment_hash: bool = True, include_body_resources: bool = True
+) -> str:
     """对用户可见文本和附件元数据生成稳定哈希，忽略 HTML 样式变化。"""
-    content_text = BeautifulSoup(notice.get("content_html", ""), "html.parser").get_text(" ")
+    soup = BeautifulSoup(notice.get("content_html", ""), "html.parser")
+    content_text = soup.get_text(" ")
 
     def normalized(value: object) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -109,6 +112,39 @@ def notice_content_hash(notice: dict, *, include_attachment_hash: bool = True) -
         "content": normalized(content_text),
         "attachments": attachments,
     }
+    if include_body_resources:
+        base = notice.get("detail_url", "")
+
+        def target(value):
+            return urljoin(base, str(value or "").strip())
+
+        def srcset(value):
+            raw = str(value or "").strip()
+            # data URL 的逗号不是候选分隔符：保守保留原值，不尝试下载资源。
+            if "data:" in raw:
+                return [("opaque", raw)]
+            candidates = []
+            for candidate in raw.split(","):
+                parts = candidate.strip().split()
+                if parts:
+                    candidates.append((target(parts[0]), " ".join(parts[1:])))
+            return candidates
+
+        resources = []
+        for node in soup.select("a[href], img, picture source[srcset]"):
+            if node.name == "a":
+                resources.append({"kind": "link", "target": target(node.get("href"))})
+            else:
+                resources.append(
+                    {
+                        "kind": node.name,
+                        "src": target(node.get("src")) if node.get("src") else "",
+                        "srcset": srcset(node.get("srcset")),
+                        "alt": normalized(node.get("alt")),
+                    }
+                )
+        if resources:
+            payload["resources"] = resources
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -989,9 +1025,14 @@ async def _collect_notice(context, notice: dict, stats: ScrapeStats) -> None:
             existing = get_notice_by_url(notice["detail_url"])
             # 兼容此前不包含附件 SHA256 的算法；内容相同时只升级基线，不重发。
             if existing and existing["content_hash"] != content_hash:
-                old_algorithm_matches = existing["content_hash"] == notice_content_hash(
-                    existing, include_attachment_hash=False
-                )
+                old_algorithm_matches = existing["content_hash"] in {
+                    notice_content_hash(
+                        existing,
+                        include_attachment_hash=attachment_hash,
+                        include_body_resources=resources,
+                    )
+                    for attachment_hash, resources in ((False, False), (True, False), (False, True))
+                }
                 old_attachments = existing.get("attachments", [])
                 if old_algorithm_matches and (
                     notice_content_hash(existing) == content_hash
