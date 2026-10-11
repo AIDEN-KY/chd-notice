@@ -165,7 +165,13 @@ async def _run_daily() -> int:
     error_type = ""
     try:
         stats = await scrape_notices(headless=True)
-        scrape_succeeded = True
+        scrape_succeeded = not stats.failed
+        if stats.failed:
+            error_type = "PartialScrape"
+            log.warning("本次抓取部分失败：%d 条已入补偿队列", stats.failed)
+            await _try_send_alert(
+                "通知抓取部分失败", f"{stats.failed} 条暂时失败已入补偿队列，请检查本地记录"
+            )
         log.info(
             "本次抓取完成：新增 %d，更新 %d，未变化 %d，建立基线 %d，共 %d 页",
             stats.new,

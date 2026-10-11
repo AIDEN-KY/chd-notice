@@ -215,8 +215,10 @@ def main() -> None:
             stats = asyncio.run(scrape_notices())
         print(
             f"抓取完成：新增 {stats.new} 条，更新 {stats.updated} 条，"
-            f"未变化 {stats.unchanged} 条，建立基线 {stats.baselined} 条"
+            f"未变化 {stats.unchanged} 条，建立基线 {stats.baselined} 条，失败 {stats.failed} 条"
         )
+        if stats.failed:
+            raise SystemExit(3)
     elif args.command == "send-now":
         raise SystemExit(asyncio.run(run_daily()))
     elif args.command == "send-pending":

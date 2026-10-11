@@ -16,6 +16,25 @@ NoticeSaveStatus = Literal["new", "updated", "unchanged", "baseline"]
 log = logging.getLogger(__name__)
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS scrape_failures (
+    detail_url TEXT PRIMARY KEY,
+    snapshot_json TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_type TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scrape_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    pages INTEGER NOT NULL DEFAULT 0,
+    new_count INTEGER NOT NULL DEFAULT 0,
+    updated_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    error_type TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS task_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -304,6 +323,81 @@ def get_notice_hash(detail_url: str) -> str | None:
             (detail_url,),
         ).fetchone()
     return None if row is None else str(row["content_hash"])
+
+
+def get_notice_by_url(detail_url: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM notices WHERE detail_url=?", (detail_url,)).fetchone()
+    return _row_to_notice(row) if row else None
+
+
+def update_notice_hash_baseline(
+    detail_url: str, old_hash: str, new_hash: str, attachments: list[dict]
+) -> None:
+    """哈希算法升级不制造新修订、不重置投递事实。调用者已核对内容一致。"""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE notices SET content_hash=?,attachments_json=? WHERE detail_url=? AND content_hash=?",
+            (new_hash, json.dumps(attachments, ensure_ascii=False), detail_url, old_hash),
+        )
+
+
+def record_scrape_failure(notice: dict, error_type: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO scrape_failures (detail_url,snapshot_json,error_type,updated_at) VALUES (?,?,?,?) ON CONFLICT(detail_url) DO UPDATE SET snapshot_json=excluded.snapshot_json,attempts=CASE WHEN scrape_failures.status='resolved' THEN 1 ELSE scrape_failures.attempts+1 END,status=CASE WHEN scrape_failures.status='resolved' THEN 'pending' WHEN scrape_failures.attempts+1 >= 5 THEN 'exhausted' ELSE 'pending' END,error_type=excluded.error_type,updated_at=excluded.updated_at",
+            (
+                notice["detail_url"],
+                json.dumps(notice, ensure_ascii=False),
+                error_type,
+                datetime.now(settings.timezone).isoformat(timespec="seconds"),
+            ),
+        )
+
+
+def get_pending_scrape_failures() -> list[dict]:
+    with connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM scrape_failures WHERE status='pending' AND attempts<5 ORDER BY updated_at,detail_url LIMIT 20"
+            )
+        ]
+
+
+def resolve_scrape_failure(detail_url: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE scrape_failures SET status='resolved',updated_at=? WHERE detail_url=?",
+            (datetime.now(settings.timezone).isoformat(timespec="seconds"), detail_url),
+        )
+
+
+def start_scrape_run() -> int:
+    now = datetime.now(settings.timezone).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            "UPDATE scrape_runs SET status='interrupted',finished_at=?,error_type='InterruptedTask' WHERE status='running'",
+            (now,),
+        )
+        return conn.execute("INSERT INTO scrape_runs (started_at) VALUES (?)", (now,)).lastrowid
+
+
+def finish_scrape_run(run_id: int, stats, *, error_type: str = "") -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE scrape_runs SET finished_at=?,status=?,pages=?,new_count=?,updated_count=?,failed_count=?,error_type=? WHERE id=?",
+            (
+                datetime.now(settings.timezone).isoformat(timespec="seconds"),
+                "failed" if error_type else "partial" if stats.failed else "success",
+                stats.pages,
+                stats.new,
+                stats.updated,
+                stats.failed,
+                error_type,
+                run_id,
+            ),
+        )
 
 
 def get_existing_notice_urls() -> dict[str, str]:

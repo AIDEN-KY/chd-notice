@@ -26,7 +26,19 @@ from playwright.async_api import (
 )
 
 from config import settings
-from db import get_existing_notice_urls, get_notice_hash, save_notice
+from db import (
+    finish_scrape_run,
+    get_existing_notice_urls,
+    get_notice_by_url,
+    get_notice_hash,
+    get_pending_scrape_failures,
+    init_db,
+    record_scrape_failure,
+    resolve_scrape_failure,
+    save_notice,
+    start_scrape_run,
+    update_notice_hash_baseline,
+)
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +54,7 @@ class ScrapeStats:
     unchanged: int = 0
     baselined: int = 0
     pages: int = 0
+    failed: int = 0
 
     @property
     def changed(self) -> int:
@@ -65,7 +78,7 @@ def evaluate_pagination_page(
     return None, consecutive
 
 
-def notice_content_hash(notice: dict) -> str:
+def notice_content_hash(notice: dict, *, include_attachment_hash: bool = True) -> str:
     """对用户可见文本和附件元数据生成稳定哈希，忽略 HTML 样式变化。"""
     content_text = BeautifulSoup(notice.get("content_html", ""), "html.parser").get_text(" ")
 
@@ -77,6 +90,11 @@ def notice_content_hash(notice: dict) -> str:
             {
                 "name": normalized(item.get("name")),
                 "url": normalized(item.get("url")),
+                **(
+                    {"sha256": item["sha256"]}
+                    if include_attachment_hash and item.get("sha256")
+                    else {}
+                ),
             }
             for item in notice.get("attachments", [])
         ),
@@ -337,6 +355,9 @@ def _safe_filename(name: str, url: str) -> str:
 
 def _validate_attachment_url(url: str) -> None:
     parsed = urlparse(url)
+    login = urlparse(settings.login_url)
+    if parsed.hostname == login.hostname or parsed.path.rstrip("/") == login.path.rstrip("/"):
+        raise SessionExpiredError("附件目标为登录页，会话可能已过期")
     allowed = getattr(settings, "attachment_allowed_hosts", ("portal.chd.edu.cn",))
     try:
         ipaddress.ip_address(parsed.hostname or "")
@@ -443,6 +464,7 @@ async def _download_attachment(context: BrowserContext, url: str, name: str) -> 
                     item.update(path=str(target.resolve()), size=size, sha256=content_hash)
                     break
     except Exception as exc:
+        item["error_type"] = type(exc).__name__
         log.warning("附件下载失败，仅保留原链接；错误类型=%s", type(exc).__name__)
     finally:
         if temporary_path is not None:
@@ -942,10 +964,87 @@ async def _fetch_api_list(
     raise RuntimeError("列表接口重试结束")
 
 
+class AttachmentDownloadError(RuntimeError):
+    pass
+
+
+async def _collect_notice(context, notice: dict, stats: ScrapeStats) -> None:
+    attempts = getattr(settings, "retry_attempts", 3)
+    for attempt in range(1, attempts + 1):
+        try:
+            content, attachments = await _scrape_detail(context, notice["detail_url"])
+            candidate = {**notice, "content_html": content, "attachments": []}
+            for attachment in attachments:
+                downloaded = await _download_attachment(
+                    context, attachment["url"], attachment["name"]
+                )
+                if not downloaded.get("path"):
+                    if downloaded.get("error_type") == "SessionExpiredError":
+                        raise SessionExpiredError("附件会话已过期，请重新手动登录")
+                    raise AttachmentDownloadError("附件未完整下载，本条保留旧版本待补偿")
+                candidate["attachments"].append(downloaded)
+            content_hash = notice_content_hash(candidate)
+            existing = get_notice_by_url(notice["detail_url"])
+            # 兼容此前不包含附件 SHA256 的算法；内容相同时只升级基线，不重发。
+            if existing and existing["content_hash"] != content_hash:
+                old_algorithm_matches = existing["content_hash"] == notice_content_hash(
+                    existing, include_attachment_hash=False
+                )
+                old_attachments = existing.get("attachments", [])
+                if old_algorithm_matches and (
+                    notice_content_hash(existing) == content_hash
+                    or (
+                        not any(a.get("sha256") for a in old_attachments)
+                        and notice_content_hash(existing, include_attachment_hash=False)
+                        == notice_content_hash(candidate, include_attachment_hash=False)
+                    )
+                ):
+                    update_notice_hash_baseline(
+                        notice["detail_url"],
+                        existing["content_hash"],
+                        content_hash,
+                        candidate["attachments"],
+                    )
+                    stats.baselined += 1
+                    resolve_scrape_failure(notice["detail_url"])
+                    return
+            status = save_notice(candidate, content_hash)
+            if status == "new":
+                stats.new += 1
+            elif status == "updated":
+                stats.updated += 1
+            elif status == "baseline":
+                stats.baselined += 1
+            else:
+                stats.unchanged += 1
+            resolve_scrape_failure(notice["detail_url"])
+            log.info("详情处理完成：%s", status)
+            return
+        except (PlaywrightTimeoutError, httpx.TransportError, AttachmentDownloadError) as exc:
+            if attempt < attempts:
+                await asyncio.sleep(getattr(settings, "retry_backoff_seconds", 3) * attempt)
+                continue
+            record_scrape_failure(notice, type(exc).__name__)
+            stats.failed += 1
+            log.warning("单条暂时失败，已入补偿队列；错误类型=%s", type(exc).__name__)
+
+
 async def scrape_notices(headless: bool = True) -> ScrapeStats:
+    init_db()
+    stats = ScrapeStats()
+    run_id = start_scrape_run()
+    try:
+        await _scrape_notices(stats, headless)
+    except BaseException as exc:
+        finish_scrape_run(run_id, stats, error_type=type(exc).__name__)
+        raise
+    finish_scrape_run(run_id, stats)
+    return stats
+
+
+async def _scrape_notices(stats: ScrapeStats, headless: bool) -> None:
     if not settings.auth_file.exists():
         raise SessionExpiredError("未找到 auth.json，请先运行 python main.py init-auth")
-    stats = ScrapeStats()
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=headless)
         context = await browser.new_context(storage_state=settings.auth_file)
@@ -988,7 +1087,6 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
                     if notice["detail_url"] in seen:
                         continue
                     seen.add(notice["detail_url"])
-                    old_hash = old_hashes[notice["detail_url"]]
                     log.info(
                         "正在检查第 %d 页详情 %d/%d：%s",
                         page_number,
@@ -996,30 +1094,7 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
                         len(summaries),
                         notice["title"],
                     )
-                    content, attachments = await _scrape_detail(context, notice["detail_url"])
-                    notice.update(content_html=content, attachments=attachments)
-                    content_hash = notice_content_hash(notice)
-                    if old_hash == content_hash:
-                        stats.unchanged += 1
-                        log.info("内容未变化：%s", notice["title"])
-                        continue
-
-                    notice["attachments"] = [
-                        await _download_attachment(context, item["url"], item["name"])
-                        for item in attachments
-                    ]
-                    status = save_notice(notice, content_hash)
-                    if status == "new":
-                        stats.new += 1
-                        log.info("新增通知：%s", notice["title"])
-                    elif status == "updated":
-                        stats.updated += 1
-                        log.info("通知内容有更新，已重新加入待发队列：%s", notice["title"])
-                    elif status == "baseline":
-                        stats.baselined += 1
-                        log.info("已为旧通知建立内容哈希基线：%s", notice["title"])
-                    else:
-                        stats.unchanged += 1
+                    await _collect_notice(context, notice, stats)
 
                 if stop_reason == "known-pages":
                     log.info(
@@ -1036,10 +1111,15 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
                     settings.max_pages_to_scrape,
                 )
             await _save_auth_state_atomic(context)
+            # 有界补偿：列表窗口外的失败也会再次检查；本次已检查的 URL 不重复请求。
+            for failure in get_pending_scrape_failures():
+                if failure["detail_url"] not in seen:
+                    seen.add(failure["detail_url"])
+                    await _collect_notice(context, json.loads(failure["snapshot_json"]), stats)
         finally:
             await context.close()
             await browser.close()
-    return stats
+    return None
 
 
 async def _save_auth_state_atomic(context: BrowserContext) -> None:
