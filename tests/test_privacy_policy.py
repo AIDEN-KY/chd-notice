@@ -173,6 +173,21 @@ def test_sensitive_notice_is_not_sent_to_ai(summary_configuration, monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "content_html", ["<p>禁止<b>转发</b></p>", "<p>禁止 转发</p>", "<p>禁止&#10;转发</p>"]
+)
+def test_ai_policy_blocks_sensitive_markers_split_by_markup_or_whitespace(
+    summary_configuration, monkeypatch, content_html
+):
+    """摘要可被手动测试入口直接调用，不能只依赖正式投递的前置过滤。"""
+
+    def forbidden_client(*_args, **_kwargs):
+        pytest.fail("Sensitive source must never construct a DeepSeek HTTP client")
+
+    monkeypatch.setattr(summarizer.httpx, "AsyncClient", forbidden_client)
+    assert _run_immediate(summarizer.summarize("测试通知", content_html)) == "测试通知"
+
+
 def test_sensitive_marker_after_prompt_limit_is_still_checked(summary_configuration, monkeypatch):
     def forbidden_client(*_args, **_kwargs):
         pytest.fail("正文截断之前必须检查全文敏感标记")

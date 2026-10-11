@@ -12,6 +12,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import settings
+from content_policy import notice_is_excluded
 
 log = logging.getLogger(__name__)
 _inflight: dict[tuple, asyncio.Future] = {}
@@ -67,9 +68,8 @@ def _preserve_fields(summary: str, fields: list[str]) -> str:
 
 async def summarize(title: str, content_html: str) -> str:
     # 并发请求同一正文时共用一个正在进行的 API 请求；策略检查先于合并。
-    if not settings.ai_summary_enabled or any(
-        keyword in f"{title}\n{html_to_text(content_html)}"
-        for keyword in settings.ai_excluded_keywords
+    if not settings.ai_summary_enabled or notice_is_excluded(
+        {"title": title, "content_html": content_html}, settings.ai_excluded_keywords
     ):
         return await _summarize(title, content_html)
     try:
@@ -102,10 +102,12 @@ async def _summarize(title: str, content_html: str) -> str:
     if not settings.ai_summary_enabled:
         log.info("AI 摘要已关闭；reason=ai_disabled")
         return title
-    text = html_to_text(content_html)
-    if any(keyword in f"{title}\n{text}" for keyword in settings.ai_excluded_keywords):
+    if notice_is_excluded(
+        {"title": title, "content_html": content_html}, settings.ai_excluded_keywords
+    ):
         log.warning("通知命中 AI 外发排除策略，未提交正文；reason=excluded_content")
         return title
+    text = html_to_text(content_html)
     if not text:
         log.warning("通知无正文；reason=empty_content")
         return title
