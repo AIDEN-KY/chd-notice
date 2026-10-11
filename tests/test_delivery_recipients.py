@@ -49,6 +49,82 @@ def add_notice(url="https://example.test/current"):
     )
 
 
+@pytest.mark.parametrize("size", [10, 20])
+def test_target_scale_digest_retry_and_unsubscribe_end_to_end(delivery_setup, tmp_path, size):
+    """真实编排、SQLite、MIME；仅替换外部摘要/SMTP/线程执行。"""
+    addresses = [f"student{i}@example.test" for i in range(size)]
+    ids = [db.add_user(a, consent_source="offline-consent") for a in addresses]
+    attachment = tmp_path / "活动说明.txt"
+    attachment.write_bytes(b"offline attachment")
+    for index in range(3):
+        db.save_notice(
+            {
+                "title": f"活动通知{index}",
+                "detail_url": f"https://example.test/scale/{index}",
+                "content_html": "<p>地点：测试报告厅；联系方式：老师。</p>",
+                "attachments": [
+                    {
+                        "name": attachment.name,
+                        "path": str(attachment),
+                        "url": "https://example.test/attachment",
+                    }
+                ],
+            },
+            f"scale-hash-{index}",
+        )
+    summaries = []
+    envelopes = []
+
+    async def summarize(title, _content):
+        summaries.append(title)
+        return f"{title}：地点为测试报告厅，请联系老师。"
+
+    class FakeSMTP:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def login(self, *_args):
+            pass
+
+        def send_message(self, message, *, from_addr, to_addrs):
+            envelopes.append(list(to_addrs))
+            assert str(message["To"]).lower() == "undisclosed-recipients:;"
+            assert message["Bcc"] is None and message["Cc"] is None
+            for address in addresses:
+                assert address.encode() not in message.as_bytes()
+            files = list(message.iter_attachments())
+            assert len(files) == 3
+            assert all(f.get_filename() == attachment.name for f in files)
+            assert all(f.get_payload(decode=True) == b"offline attachment" for f in files)
+            if len(envelopes) == 1:
+                return {a: (450, b"temporary refusal") for a in addresses[-2:]}
+            return {}
+
+    delivery_setup.setattr(service, "summarize", summarize)
+    delivery_setup.setattr(mailer.smtplib, "SMTP_SSL", FakeSMTP)
+    assert _run_immediate(service.send_pending_today()) == 3
+    assert envelopes == [addresses]
+    assert len(summaries) == 3, "摘要数量应与通知数而非订阅人数相关"
+    db.set_user_status(ids[-1], "unsubscribed")
+    assert _run_immediate(service.send_pending_today()) == 3
+    assert envelopes == [addresses, [addresses[-2]]]
+    assert len(summaries) == 3, "固定批次重试必须复用冻结摘要"
+    assert _run_immediate(service.send_pending_today()) == 0
+    assert len(envelopes) == 2
+    with db.connect() as conn:
+        rows = list(conn.execute("SELECT * FROM batch_recipients ORDER BY user_id"))
+        assert [r["status"] for r in rows] == ["accepted"] * (size - 1) + ["skipped"]
+        assert [r["attempts"] for r in rows] == [1] * (size - 2) + [2, 1]
+        assert conn.execute("SELECT COUNT(*) FROM digest_batches").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM user_notice_deliveries").fetchone()[0] == size * 3
+
+
 def register_pair():
     return [
         db.add_user(address, consent_source="explicit-consent")
