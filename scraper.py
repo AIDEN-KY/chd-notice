@@ -29,10 +29,12 @@ from config import settings
 from db import (
     finish_scrape_run,
     get_existing_notice_urls,
+    get_history_scan_cursor,
     get_notice_by_url,
     get_notice_hash,
     get_pending_scrape_failures,
     init_db,
+    record_scan_page,
     record_scrape_failure,
     resolve_scrape_failure,
     save_notice,
@@ -1034,7 +1036,7 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
     stats = ScrapeStats()
     run_id = start_scrape_run()
     try:
-        await _scrape_notices(stats, headless)
+        await _scrape_notices(stats, headless, run_id)
     except BaseException as exc:
         finish_scrape_run(run_id, stats, error_type=type(exc).__name__)
         raise
@@ -1042,7 +1044,7 @@ async def scrape_notices(headless: bool = True) -> ScrapeStats:
     return stats
 
 
-async def _scrape_notices(stats: ScrapeStats, headless: bool) -> None:
+async def _scrape_notices(stats: ScrapeStats, headless: bool, run_id: int) -> None:
     if not settings.auth_file.exists():
         raise SessionExpiredError("未找到 auth.json，请先运行 python main.py init-auth")
     async with async_playwright() as pw:
@@ -1054,61 +1056,88 @@ async def _scrape_notices(stats: ScrapeStats, headless: bool) -> None:
             await _open_notice_list(page)
             log.info("通知列表已加载：%s", page.url)
             seen: set[str] = set()
-            page_fingerprints: set[tuple[str, ...]] = set()
             existing_urls = get_existing_notice_urls()
-            consecutive_known_pages = 0
-            for page_number in range(1, settings.max_pages_to_scrape + 1):
-                stats.pages = page_number
-                log.info(
-                    "开始处理列表第 %d 页（安全上限 %d 页）",
-                    page_number,
-                    settings.max_pages_to_scrape,
-                )
-                summaries = await _fetch_api_list(context, page_number, existing_urls)
-                if not summaries:
-                    log.info("列表接口第 %d 页为空，已到列表末尾", page_number)
-                    break
-                fingerprint = tuple(item["detail_url"] for item in summaries)
-                old_hashes = {
-                    item["detail_url"]: get_notice_hash(item["detail_url"]) for item in summaries
-                }
-                page_all_known = all(value is not None for value in old_hashes.values())
-                stop_reason, consecutive_known_pages = evaluate_pagination_page(
-                    fingerprint,
-                    page_fingerprints,
-                    consecutive_known_pages,
-                    page_all_known,
-                    settings.known_pages_to_stop,
-                )
-                if stop_reason == "repeated":
-                    log.warning("分页后列表内容重复，为避免循环已停止抓取")
-                    break
-                for index, notice in enumerate(summaries, start=1):
-                    if notice["detail_url"] in seen:
-                        continue
-                    seen.add(notice["detail_url"])
-                    log.info(
-                        "正在检查第 %d 页详情 %d/%d：%s",
-                        page_number,
-                        index,
-                        len(summaries),
-                        notice["title"],
-                    )
-                    await _collect_notice(context, notice, stats)
+            total_budget = settings.max_pages_to_scrape
+            if total_budget < 1:
+                raise ValueError("列表页预算必须大于零")
+            history_budget = (
+                min(getattr(settings, "history_pages_per_run", 2), total_budget - 1)
+                if getattr(settings, "history_scan_enabled", False)
+                else 0
+            )
+            recent_budget = total_budget - history_budget
+            last_recent_page = 0
+            empty_latest = False
 
-                if stop_reason == "known-pages":
-                    log.info(
-                        "已连续处理 %d 个全部已知页面，安全停止翻页",
-                        consecutive_known_pages,
-                    )
-                    break
-                if len(summaries) < settings.list_page_size:
-                    log.info("当前页不足 %d 条，已到列表末尾", settings.list_page_size)
-                    break
-            else:
-                log.warning(
-                    "已达到 %d 页安全上限，本次抓取停止；不代表已遍历全部历史通知",
-                    settings.max_pages_to_scrape,
+            async def scan_phase(start_page: int, budget: int, phase: str):
+                nonlocal last_recent_page, empty_latest
+                fingerprints = set()
+                consecutive_known = 0
+                for offset in range(budget):
+                    page_number = start_page + offset
+                    stats.pages += 1
+                    summaries = []
+                    try:
+                        summaries = await _fetch_api_list(context, page_number, existing_urls)
+                        reason = "budget" if offset == budget - 1 else "continue"
+                        if not summaries:
+                            reason = "empty"
+                        else:
+                            fingerprint = tuple(item["detail_url"] for item in summaries)
+                            if fingerprint in fingerprints:
+                                reason = "repeated"
+                            else:
+                                fingerprints.add(fingerprint)
+                                all_known = all(
+                                    get_notice_hash(item["detail_url"]) is not None
+                                    for item in summaries
+                                )
+                                consecutive_known = consecutive_known + 1 if all_known else 0
+                                for notice in summaries:
+                                    if notice["detail_url"] not in seen:
+                                        seen.add(notice["detail_url"])
+                                        await _collect_notice(context, notice, stats)
+                                if len(summaries) < settings.list_page_size:
+                                    reason = "end"
+                                elif (
+                                    phase == "latest"
+                                    and consecutive_known >= settings.known_pages_to_stop
+                                ):
+                                    reason = "known-pages"
+                        if phase == "latest":
+                            last_recent_page = page_number
+                            empty_latest = page_number == 1 and reason == "empty"
+                        next_page = (
+                            (2 if reason in {"empty", "end"} else page_number + 1)
+                            if phase == "history"
+                            else None
+                        )
+                        if phase == "history" and reason == "budget" and budget > 1:
+                            # 每轮保留一页边界重叠，缓解页码因新通知插入而位移。
+                            next_page = page_number
+                        record_scan_page(
+                            run_id, phase, page_number, len(summaries), reason, next_page=next_page
+                        )
+                        log.info(
+                            "扫描范围：%s 第 %d 页，%d 条，原因=%s",
+                            phase,
+                            page_number,
+                            len(summaries),
+                            reason,
+                        )
+                        if reason != "continue":
+                            break
+                    except BaseException:
+                        record_scan_page(
+                            run_id, phase, page_number, len(summaries), "system-failure"
+                        )
+                        raise
+
+            await scan_phase(1, recent_budget, "latest")
+            if history_budget and not empty_latest:
+                start_page = max(get_history_scan_cursor(), last_recent_page + 1)
+                await scan_phase(
+                    start_page, min(history_budget, total_budget - stats.pages), "history"
                 )
             await _save_auth_state_atomic(context)
             # 有界补偿：列表窗口外的失败也会再次检查；本次已检查的 URL 不重复请求。

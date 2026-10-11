@@ -58,6 +58,9 @@ class Settings:
     # 动态翻页：连续遇到若干个全部已知的页面后停止，并设置最大页数兜底。
     max_pages_to_scrape: int = 20
     known_pages_to_stop: int = 3
+    history_pages_per_run: int = field(
+        default_factory=lambda: _positive_int_env("HISTORY_PAGES_PER_RUN", 2)
+    )
     spa_wait_ms: int = 2_500
     spa_load_timeout_ms: int = 30_000
     action_timeout_ms: int = 20_000
@@ -157,6 +160,13 @@ class Settings:
     scroll_container_selectors: list[str] = field(
         default_factory=lambda: _selectors("SCROLL_CONTAINER_SELECTORS", ["#app"])
     )
+
+    @property
+    def history_scan_enabled(self) -> bool:
+        value = os.getenv("HISTORY_SCAN_ENABLED", "true").strip().lower()
+        if value not in {"true", "false", "1", "0"}:
+            raise ValueError("HISTORY_SCAN_ENABLED 必须为 true/false/1/0")
+        return value in {"true", "1"}
 
     @property
     def ai_summary_enabled(self) -> bool:

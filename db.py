@@ -16,6 +16,19 @@ NoticeSaveStatus = Literal["new", "updated", "unchanged", "baseline"]
 log = logging.getLogger(__name__)
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS history_scan_state (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    next_page INTEGER NOT NULL DEFAULT 2,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scrape_run_pages (
+    run_id INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    page_number INTEGER NOT NULL,
+    item_count INTEGER NOT NULL,
+    stop_reason TEXT NOT NULL,
+    PRIMARY KEY(run_id,phase,page_number)
+);
 CREATE TABLE IF NOT EXISTS scrape_failures (
     detail_url TEXT PRIMARY KEY,
     snapshot_json TEXT NOT NULL,
@@ -323,6 +336,33 @@ def get_notice_hash(detail_url: str) -> str | None:
             (detail_url,),
         ).fetchone()
     return None if row is None else str(row["content_hash"])
+
+
+def get_history_scan_cursor() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT next_page FROM history_scan_state WHERE id=1").fetchone()
+    return max(2, int(row[0])) if row else 2
+
+
+def record_scan_page(
+    run_id: int,
+    phase: str,
+    page_number: int,
+    item_count: int,
+    stop_reason: str,
+    *,
+    next_page: int | None = None,
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO scrape_run_pages VALUES (?,?,?,?,?)",
+            (run_id, phase, page_number, item_count, stop_reason),
+        )
+        if next_page is not None:
+            conn.execute(
+                "INSERT INTO history_scan_state (id,next_page,updated_at) VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET next_page=excluded.next_page,updated_at=excluded.updated_at",
+                (max(2, next_page), datetime.now(settings.timezone).isoformat(timespec="seconds")),
+            )
 
 
 def get_notice_by_url(detail_url: str) -> dict | None:
