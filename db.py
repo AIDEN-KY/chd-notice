@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 from typing import Iterator, Literal
 from urllib.parse import parse_qs, urlparse
@@ -290,6 +290,124 @@ def get_active_users() -> list[dict]:
             dict(row)
             for row in conn.execute("SELECT * FROM users WHERE status = 'active' ORDER BY id")
         ]
+
+
+def get_delivery_preview() -> dict:
+    """读取一致性快照；不初始化、迁移、领取批次或修改投递事实。"""
+    today = datetime.now(settings.timezone).date().isoformat()
+    report = {
+        "database_status": "missing",
+        "date": today,
+        "active_users": 0,
+        "pending_unique_notices": 0,
+        "pending_recipient_notices": 0,
+        "existing_pending_batches": 0,
+        "unknown_recipient_batches": 0,
+        "users_with_daily_budget": 0,
+        "max_notices_per_digest": getattr(settings, "max_notices_per_digest", 20),
+        "max_digest_messages_per_day": getattr(settings, "max_digest_messages_per_day", 1),
+        "estimated_attachment_bytes": 0,
+        "max_attachment_bytes_per_digest": getattr(
+            settings, "max_attachment_bytes", 20 * 1024 * 1024
+        ),
+        "max_message_bytes": getattr(settings, "max_message_bytes", 20 * 1024 * 1024),
+        "attachment_size_basis": "stored_metadata_not_mime_size",
+        "attachments_with_unknown_size": 0,
+        "history_policy": "subscription_watermark",
+        "pending_fetched_date_range": None,
+        "delivery_enabled": getattr(settings, "multi_user_delivery_ready", False),
+    }
+    if not settings.database_file.is_file():
+        return report
+    try:
+        with closing(
+            sqlite3.connect(settings.database_file.resolve().as_uri() + "?mode=ro", uri=True)
+        ) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            users = conn.execute(
+                "SELECT id,start_after_notice_id FROM users WHERE status='active'"
+            ).fetchall()
+            # 未分配的新修订，以及仍可有限重试的固定快照；不能把 unknown 当作待自动发送。
+            fresh = conn.execute(
+                "SELECT u.id AS user_id,n.id AS notice_id,n.revision_count,n.attachments_json,n.fetched_date "
+                "FROM users u JOIN notices n ON n.id>u.start_after_notice_id WHERE u.status='active' "
+                "AND NOT EXISTS (SELECT 1 FROM user_notice_deliveries d WHERE d.user_id=u.id "
+                "AND d.notice_id=n.id AND d.revision_count=n.revision_count)"
+            ).fetchall()
+            frozen = conn.execute(
+                "SELECT r.user_id,r.batch_id,n.notice_id,n.revision_count,n.snapshot_json "
+                "FROM batch_recipients r JOIN users u ON u.id=r.user_id "
+                "JOIN batch_notices n ON n.batch_id=r.batch_id "
+                "WHERE u.status='active' AND u.email=r.email AND r.status IN ('pending','refused') "
+                "AND r.attempts<3 AND u.start_after_notice_id < "
+                "(SELECT MIN(notice_id) FROM batch_notices WHERE batch_id=r.batch_id)"
+            ).fetchall()
+            candidates = {}
+            for row in fresh:
+                candidates[(row["user_id"], row["notice_id"], row["revision_count"])] = {
+                    "id": row["notice_id"],
+                    "revision_count": row["revision_count"],
+                    "attachments": json.loads(row["attachments_json"]),
+                    "fetched_date": row["fetched_date"],
+                }
+            for row in frozen:
+                candidates[(row["user_id"], row["notice_id"], row["revision_count"])] = json.loads(
+                    row["snapshot_json"]
+                )
+            available = 0
+            for user in users:
+                used = conn.execute(
+                    "SELECT COUNT(*) FROM (SELECT batch_id FROM daily_digest_reservations "
+                    "WHERE user_id=? AND delivery_date=? UNION SELECT batch_id FROM batch_recipients "
+                    "WHERE user_id=? AND status IN ('accepted','unknown','sending') AND substr(updated_at,1,10)=?)",
+                    (user["id"], today, user["id"], today),
+                ).fetchone()[0]
+                available += used < report["max_digest_messages_per_day"]
+            unknown = conn.execute(
+                "SELECT COUNT(*) FROM batch_recipients r JOIN users u ON u.id=r.user_id "
+                "WHERE u.status='active' AND r.status IN ('unknown','sending')"
+            ).fetchone()[0]
+            for notice in candidates.values():
+                if not isinstance(notice, dict) or not isinstance(
+                    notice.get("attachments", []), list
+                ):
+                    raise ValueError("Invalid notice snapshot")
+                if any(not isinstance(item, dict) for item in notice.get("attachments", [])):
+                    raise ValueError("Invalid attachment metadata")
+                if notice.get("fetched_date") is not None and not isinstance(
+                    notice["fetched_date"], str
+                ):
+                    raise ValueError("Invalid notice date")
+            conn.rollback()
+    except (sqlite3.Error, ValueError, TypeError):
+        report["database_status"] = "unreadable_or_incompatible"
+        return report
+    unique = {(key[1], key[2]): notice for key, notice in candidates.items()}
+    sizes = []
+    unknown_sizes = 0
+    for notice in unique.values():
+        for attachment in notice.get("attachments", []):
+            size = attachment.get("size")
+            if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+                sizes.append(size)
+            else:
+                unknown_sizes += 1
+    dates = sorted(n["fetched_date"] for n in unique.values() if n.get("fetched_date"))
+    report.update(
+        database_status="ready",
+        active_users=len(users),
+        pending_unique_notices=len({key[1] for key in candidates}),
+        pending_recipient_notices=len(candidates),
+        existing_pending_batches=len({row["batch_id"] for row in frozen}),
+        unknown_recipient_batches=unknown,
+        users_with_daily_budget=available,
+        estimated_attachment_bytes=sum(sizes),
+        attachments_with_unknown_size=unknown_sizes,
+        pending_fetched_date_range=[dates[0], dates[-1]] if dates else None,
+    )
+    return report
 
 
 def authorize_history(user_id: int, *, reason: str) -> None:

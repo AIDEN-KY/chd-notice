@@ -15,6 +15,7 @@ from config import settings  # noqa: E402
 from db import (  # noqa: E402  # noqa: E402
     add_user,
     authorize_history,
+    get_delivery_preview,
     get_unknown_recipients,
     get_users,
     init_db,
@@ -86,6 +87,7 @@ def main() -> None:
         "command",
         choices=[
             "doctor",
+            "preview",
             "diagnose-api",
             "diagnose-pagination",
             "init-auth",
@@ -150,6 +152,9 @@ def main() -> None:
             parser.error("users add 必须指定 --email")
         if args.action in {"pause", "resume", "unsubscribe", "backfill"} and args.user_id is None:
             parser.error("修改用户状态必须指定 --user-id")
+    if args.command == "preview":
+        print(json.dumps(get_delivery_preview(), ensure_ascii=False, indent=2))
+        return
     configure_logging()
     if args.command != "send-test":
         init_db()
