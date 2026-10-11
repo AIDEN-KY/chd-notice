@@ -53,10 +53,13 @@ async def _within_budget(awaitable, deadline: float):
         # 离线同步驱动的协程测试没有事件循环；实际 CLI 总在 asyncio.run 中运行。
         result = await awaitable
     else:
+        task = asyncio.create_task(awaitable)
         try:
-            result = await asyncio.wait_for(awaitable, timeout=deadline - time.monotonic())
+            result = await asyncio.wait_for(task, timeout=deadline - time.monotonic())
         except TimeoutError as exc:
-            if time.monotonic() < deadline:
+            # wait_for 的计时回调在部分 Windows runner 上会略早于 monotonic deadline；
+            # 被 wait_for 取消表示预算等待超时，协程自身的 TimeoutError 则保持原语义。
+            if task.done() and not task.cancelled():
                 raise
             raise TaskBudgetExceeded("任务时间预算耗尽") from exc
     _check_budget(deadline)
