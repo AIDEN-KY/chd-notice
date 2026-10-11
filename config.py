@@ -86,7 +86,15 @@ class Settings:
     pdf_preview_host: str = "portal.chd.edu.cn"
     pdf_preview_path: str = "/qljfwapp/sys/emapcomponent/pdf/index.do"
     attachment_download_path_prefix: str = "/qljfwapp/sys/emapcomponent/file/getAttachmentFile/"
-    summary_prompt_version: str = "important-information-v1"
+    summary_prompt_version: str = "important-information-v2-validated"
+    task_time_budget_seconds: int = field(
+        default_factory=lambda: _positive_int_env("TASK_TIME_BUDGET_SECONDS", 900)
+    )
+    summary_concurrency: int = field(
+        default_factory=lambda: min(_positive_int_env("SUMMARY_CONCURRENCY", 2), 8)
+    )
+    summary_min_chars: int = 50
+    summary_max_chars: int = 400
     max_notices_per_digest: int = field(
         default_factory=lambda: _positive_int_env("MAX_NOTICES_PER_DIGEST", 20)
     )

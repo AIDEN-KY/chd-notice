@@ -185,7 +185,7 @@ def test_daily_run_alerts_when_cas_session_expires_and_continues(tmp_path, monke
     async def expired_scrape(headless: bool):
         raise SessionExpiredError("会话已过期")
 
-    async def fake_send_pending() -> int:
+    async def fake_send_pending(deadline=None) -> int:
         pending_calls.append(True)
         return 0
 
@@ -214,7 +214,7 @@ def test_daily_run_alerts_and_reraises_send_failure(tmp_path, monkeypatch) -> No
     async def successful_scrape(headless: bool) -> ScrapeStats:
         return ScrapeStats()
 
-    async def failed_send_pending() -> int:
+    async def failed_send_pending(deadline=None) -> int:
         raise RuntimeError("send failed")
 
     async def fake_to_thread(function, *args, **kwargs):

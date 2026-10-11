@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 
 from config import settings
 from db import (
@@ -27,6 +28,67 @@ from summarizer import summarize
 from task_lock import task_lock
 
 log = logging.getLogger(__name__)
+
+
+class TaskBudgetExceeded(TimeoutError):
+    pass
+
+
+def _check_budget(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise TaskBudgetExceeded("任务时间预算耗尽")
+
+
+async def _within_budget(awaitable, deadline: float):
+    try:
+        _check_budget(deadline)
+    except TaskBudgetExceeded:
+        awaitable.close()
+        raise
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # 离线同步驱动的协程测试没有事件循环；实际 CLI 总在 asyncio.run 中运行。
+        result = await awaitable
+    else:
+        try:
+            result = await asyncio.wait_for(awaitable, timeout=deadline - time.monotonic())
+        except TimeoutError as exc:
+            if time.monotonic() < deadline:
+                raise
+            raise TaskBudgetExceeded("任务时间预算耗尽") from exc
+    _check_budget(deadline)
+    return result
+
+
+async def _summarize_batch(notices: list[dict], deadline: float) -> None:
+    pending = iter(n for n in notices if "summary" not in n)
+
+    async def worker():
+        for notice in pending:
+            _check_budget(deadline)
+            notice["summary"] = await summarize(notice["title"], notice["content_html"])
+            _check_budget(deadline)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        await _within_budget(worker(), deadline)
+        return
+    # 只创建有限个 worker，不为积压中的每条通知创建一个任务。
+    count = min(max(1, getattr(settings, "summary_concurrency", 2)), 8, len(notices))
+    tasks = [asyncio.create_task(worker()) for _ in range(count)]
+    try:
+
+        async def complete():
+            await asyncio.gather(*tasks)
+
+        await _within_budget(complete(), deadline)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def delivery_identity(notices: list[dict]) -> tuple[str, str]:
@@ -77,9 +139,11 @@ async def send_pending_today() -> int:
         return await _send_pending_today()
 
 
-async def _send_pending_today() -> int:
+async def _send_pending_today(deadline: float | None = None) -> int:
     """发送全部历史待发通知，不再次触发抓取。命令名为兼容 v1.0 保留。"""
     init_db()
+    if deadline is None:
+        deadline = time.monotonic() + getattr(settings, "task_time_budget_seconds", 900)
     users = get_active_users()
     if not users:
         log.info("没有启用的订阅者，不生成摘要、不发送日报；通知保持待发")
@@ -91,10 +155,17 @@ async def _send_pending_today() -> int:
     delivered = 0
     for batch in get_retryable_batches():
         notices = get_batch_notices(batch["id"])
-        for notice in notices:
-            if "summary" not in notice:
-                notice["summary"] = await summarize(notice["title"], notice["content_html"])
+        try:
+            _check_budget(deadline)
+            await _summarize_batch(notices, deadline)
+            _check_budget(deadline)
+        except TaskBudgetExceeded:
+            log.warning("任务预算耗尽，未发送批次保持待发；reason=task_budget_exceeded")
+            break
         store_batch_summaries(batch["id"], notices)
+        if time.monotonic() >= deadline:
+            log.warning("任务预算耗尽，不领取收件人；reason=task_budget_exceeded")
+            break
         recipients = claim_batch_recipients(batch["id"])
         if not recipients:
             continue
@@ -151,6 +222,7 @@ async def run_daily() -> int:
 
 
 async def _run_daily() -> int:
+    deadline = time.monotonic() + getattr(settings, "task_time_budget_seconds", 900)
     try:
         init_db()
         recovered = recover_interrupted_batches()
@@ -164,7 +236,7 @@ async def _run_daily() -> int:
     scrape_succeeded = False
     error_type = ""
     try:
-        stats = await scrape_notices(headless=True)
+        stats = await _within_budget(scrape_notices(headless=True), deadline)
         scrape_succeeded = not stats.failed
         if stats.failed:
             error_type = "PartialScrape"
@@ -180,6 +252,9 @@ async def _run_daily() -> int:
             stats.baselined,
             stats.pages,
         )
+    except TaskBudgetExceeded:
+        error_type = "TaskBudgetExceeded"
+        log.warning("抓取达到任务预算，停止后续处理；reason=task_budget_exceeded")
     except SessionExpiredError as exc:
         error_type = type(exc).__name__
         log.error("CAS 会话已过期；跳过抓取，继续处理数据库中的待发送通知")
@@ -193,7 +268,7 @@ async def _run_daily() -> int:
         await _try_send_alert("通知抓取失败", error_type)
 
     try:
-        delivered_count = await _send_pending_today()
+        delivered_count = await _send_pending_today(deadline)
     except Exception as exc:
         finish_task_run(
             run_id,
@@ -203,11 +278,14 @@ async def _run_daily() -> int:
         )
         await _try_send_alert("日报发送任务失败", type(exc).__name__)
         raise
+    budget_expired = time.monotonic() >= deadline
+    if budget_expired:
+        error_type = "TaskBudgetExceeded"
     finish_task_run(
         run_id,
-        status="success" if scrape_succeeded else "degraded",
+        status="success" if scrape_succeeded and not budget_expired else "degraded",
         scrape_succeeded=scrape_succeeded,
         delivered_count=delivered_count,
         error_type=error_type,
     )
-    return 0 if scrape_succeeded else 3
+    return 0 if scrape_succeeded and not budget_expired else 3

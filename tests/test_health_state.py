@@ -32,7 +32,7 @@ def test_failed_scrape_with_successful_inventory_send_returns_degraded(tmp_path,
     async def expired_scrape(**_kwargs):
         raise scraper.SessionExpiredError("会话已过期")
 
-    async def fake_pending():
+    async def fake_pending(deadline=None):
         sends.append(True)
         return 1
 
@@ -85,7 +85,7 @@ def test_health_records_success_and_preserves_last_success_on_later_failure(tmp_
     async def successful_scrape(**_kwargs):
         return scraper.ScrapeStats()
 
-    async def pending():
+    async def pending(deadline=None):
         return 0
 
     monkeypatch.setattr(service, "scrape_notices", successful_scrape)

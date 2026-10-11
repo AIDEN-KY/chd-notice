@@ -14,28 +14,113 @@ from bs4 import BeautifulSoup
 from config import settings
 
 log = logging.getLogger(__name__)
+_inflight: dict[tuple, asyncio.Future] = {}
 
 
 def html_to_text(value: str) -> str:
     return re.sub(r"\s+", " ", BeautifulSoup(value or "", "html.parser").get_text(" ")).strip()
 
 
+def _critical_fields(text: str) -> list[str]:
+    """保留明确标签及可识别日期/号码；不推测没有标签的地点或联系人。"""
+    labels = r"报名截止时间|报名截止|截止时间|活动时间|活动地点|联系方式|联系人|联系电话|QQ群号|QQ群|时间|地点|电话|邮箱"
+    fields = [
+        match.group(0).strip()
+        for match in re.finditer(
+            rf"(?:{labels})\s*[：:]\s*[^；;\n。]+?(?=[；;\n。]|(?:{labels})\s*[：:]|$)", text
+        )
+    ]
+    patterns = [
+        r"(?:\d{4}年)?\d{1,2}月\d{1,2}日(?:\s*\d{1,2}[:：]\d{2})?",
+        r"\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:\s*\d{1,2}:\d{2})?",
+        r"(?<!\d)1[3-9]\d{9}(?!\d)",
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        r"QQ群(?:号)?\s*[：:]?\s*\d{5,12}",
+    ]
+    for pattern in patterns:
+        fields.extend(match.group(0) for match in re.finditer(pattern, text))
+    return list(dict.fromkeys(fields))
+
+
+def _output_reason(value: object) -> str:
+    if not isinstance(value, str):
+        return "invalid_output_type"
+    if not value.strip():
+        return "empty_output"
+    if re.search(r"<[^>]+>|```|[\x00-\x08\x0b\x0c\x0e-\x1f]", value):
+        return "unsafe_output"
+    length = len(re.sub(r"\s+", "", value))
+    if length < getattr(settings, "summary_min_chars", 50):
+        return "output_too_short"
+    if length > getattr(settings, "summary_max_chars", 400):
+        return "output_too_long"
+    return ""
+
+
+def _preserve_fields(summary: str, fields: list[str]) -> str:
+    missing = [field for field in fields if field not in summary]
+    if missing:
+        log.warning("摘要补充原文关键字段；reason=critical_fields_restored")
+        return summary + "\n重要信息：" + "；".join(missing)
+    return summary
+
+
 async def summarize(title: str, content_html: str) -> str:
+    # 并发请求同一正文时共用一个正在进行的 API 请求；策略检查先于合并。
+    if not settings.ai_summary_enabled or any(
+        keyword in f"{title}\n{html_to_text(content_html)}"
+        for keyword in settings.ai_excluded_keywords
+    ):
+        return await _summarize(title, content_html)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return await _summarize(title, content_html)
+    key = (
+        loop,
+        title,
+        content_html,
+        settings.deepseek_model,
+        getattr(settings, "summary_prompt_version", "important-information-v2-validated"),
+    )
+    if key in _inflight:
+        return await asyncio.shield(_inflight[key])
+    future = loop.create_future()
+    _inflight[key] = future
+    try:
+        result = await _summarize(title, content_html)
+        future.set_result(result)
+        return result
+    except BaseException:
+        future.cancel()
+        raise
+    finally:
+        _inflight.pop(key, None)
+
+
+async def _summarize(title: str, content_html: str) -> str:
     if not settings.ai_summary_enabled:
+        log.info("AI 摘要已关闭；reason=ai_disabled")
         return title
     text = html_to_text(content_html)
     if any(keyword in f"{title}\n{text}" for keyword in settings.ai_excluded_keywords):
-        log.warning("通知命中 AI 外发排除策略，未提交正文；摘要降级为标题")
+        log.warning("通知命中 AI 外发排除策略，未提交正文；reason=excluded_content")
         return title
     if not text:
+        log.warning("通知无正文；reason=empty_content")
         return title
+    fields = _critical_fields(BeautifulSoup(content_html, "html.parser").get_text("\n"))
+
+    def fallback():
+        return _preserve_fields(title, fields)
+
     cache_key = hashlib.sha256(
         json.dumps(
             [
                 title,
                 content_html,
                 settings.deepseek_model,
-                getattr(settings, "summary_prompt_version", "important-information-v1"),
+                getattr(settings, "summary_prompt_version", "important-information-v2-validated"),
             ],
             ensure_ascii=False,
         ).encode("utf-8")
@@ -48,7 +133,9 @@ async def summarize(title: str, content_html: str) -> str:
                     "SELECT summary FROM summary_cache WHERE cache_key=?", (cache_key,)
                 ).fetchone()
             if row:
-                return row[0]
+                if not _output_reason(row[0]):
+                    return _preserve_fields(row[0], fields)
+                log.warning("缓存摘要未通过校验，重新生成；reason=invalid_cached_output")
         except sqlite3.Error:
             log.warning("摘要缓存读取失败，将尝试生成摘要")
     prompt = (
@@ -73,7 +160,12 @@ async def summarize(title: str, content_html: str) -> str:
                     },
                 )
                 response.raise_for_status()
-                summary = response.json()["choices"][0]["message"]["content"].strip()
+                summary = response.json()["choices"][0]["message"]["content"]
+                reason = _output_reason(summary)
+                if reason:
+                    log.warning("AI 输出未通过校验，降级；reason=%s", reason)
+                    return fallback()
+                summary = summary.strip()
                 if summary and database_file is not None:
                     try:
                         with closing(sqlite3.connect(database_file)) as connection, connection:
@@ -83,12 +175,12 @@ async def summarize(title: str, content_html: str) -> str:
                             )
                     except sqlite3.Error:
                         log.warning("摘要缓存写入失败，不阻塞本次发送")
-                return summary or title
+                return _preserve_fields(summary, fields)
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status != 429 and status < 500:
-                    log.warning("DeepSeek 请求被拒绝（HTTP %d），降级为标题", status)
-                    return title
+                    log.warning("DeepSeek 请求被拒绝（HTTP %d）；reason=api_rejected", status)
+                    return fallback()
                 error: Exception = exc
             except Exception as exc:
                 error = exc
@@ -104,5 +196,7 @@ async def summarize(title: str, content_html: str) -> str:
                 )
                 await asyncio.sleep(delay)
             else:
-                log.warning("DeepSeek 摘要失败，降级为标题；错误类型：%s", type(error).__name__)
-    return title
+                log.warning(
+                    "DeepSeek 摘要失败；reason=api_failed error_type=%s", type(error).__name__
+                )
+    return fallback()
