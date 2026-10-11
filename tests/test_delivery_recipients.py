@@ -207,6 +207,8 @@ def test_all_refused_retries_are_bounded_and_permanent_refusals_stop(
 
 
 def test_retry_uses_original_snapshot_even_after_notice_update(delivery_setup):
+    # 此测试显式允许第二份新修订日报；原批次重试仍使用固定快照。
+    service.settings.max_digest_messages_per_day = 2
     register_pair()
     add_notice()
     snapshots = []
@@ -289,6 +291,8 @@ def test_recipient_batch_schema_is_repeatable_without_losing_users(delivery_setu
 
 
 def test_explicit_history_authorization_preserves_existing_acceptances(delivery_setup):
+    # 历史补发测试显式选择当日两封，不绕过默认每日一封政策。
+    service.settings.max_digest_messages_per_day = 2
     add_notice("https://example.test/history")
     user_id = db.add_user("a@example.test", consent_source="explicit-consent")
     add_notice("https://example.test/new")

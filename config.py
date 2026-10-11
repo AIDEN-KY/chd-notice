@@ -83,6 +83,13 @@ class Settings:
     schedule_minute: int = 0
     deepseek_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-chat"
+    summary_prompt_version: str = "important-information-v1"
+    max_notices_per_digest: int = field(
+        default_factory=lambda: _positive_int_env("MAX_NOTICES_PER_DIGEST", 20)
+    )
+    max_digest_messages_per_day: int = field(
+        default_factory=lambda: _positive_int_env("MAX_DIGEST_MESSAGES_PER_DAY", 1)
+    )
     smtp_host: str = "smtp.qq.com"
     smtp_port: int = 465
     # 授权范围及上线验收未完成前不得开放正式多人发送；不提供环境变量绕过。

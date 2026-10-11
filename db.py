@@ -16,6 +16,17 @@ NoticeSaveStatus = Literal["new", "updated", "unchanged", "baseline"]
 log = logging.getLogger(__name__)
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS summary_cache (
+    cache_key TEXT PRIMARY KEY,
+    summary TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS daily_digest_reservations (
+    user_id INTEGER NOT NULL,
+    batch_id INTEGER NOT NULL,
+    delivery_date TEXT NOT NULL,
+    PRIMARY KEY(user_id,batch_id,delivery_date)
+);
 CREATE TABLE IF NOT EXISTS history_scan_state (
     id INTEGER PRIMARY KEY CHECK(id=1),
     next_page INTEGER NOT NULL DEFAULT 2,
@@ -739,7 +750,7 @@ def prepare_recipient_batches(users: list[dict]) -> None:
                     "SELECT 1 FROM user_notice_deliveries WHERE user_id=? AND notice_id=? AND revision_count=?",
                     (user["id"], notice["id"], notice["revision_count"]),
                 ).fetchone()
-            ]
+            ][: getattr(settings, "max_notices_per_digest", 20)]
             if not pending:
                 continue
             fingerprint = tuple((n["id"], n["revision_count"], n["content_hash"]) for n in pending)
@@ -831,6 +842,32 @@ def claim_batch_recipients(batch_id: int) -> list[dict]:
                 and user["start_after_notice_id"] < minimum_id
             )
             if eligible:
+                today = now[:10]
+                # 同一固定快照的有限重试不占用第二封预算；未知结果也保守占用预算。
+                reserved = conn.execute(
+                    "SELECT 1 FROM daily_digest_reservations WHERE user_id=? AND batch_id=? AND delivery_date=?",
+                    (row["user_id"], batch_id, today),
+                ).fetchone()
+                used = conn.execute(
+                    "SELECT COUNT(*) FROM daily_digest_reservations WHERE user_id=? AND delivery_date=?",
+                    (row["user_id"], today),
+                ).fetchone()[0]
+                # 升级前的今日发送事实也计入，避免部署当天重复投递。
+                legacy = conn.execute(
+                    "SELECT COUNT(*) FROM batch_recipients r WHERE r.user_id=? "
+                    "AND r.status IN ('accepted','unknown','sending') AND substr(r.updated_at,1,10)=? "
+                    "AND r.batch_id!=? AND NOT EXISTS (SELECT 1 FROM daily_digest_reservations d "
+                    "WHERE d.user_id=r.user_id AND d.batch_id=r.batch_id AND d.delivery_date=?)",
+                    (row["user_id"], today, batch_id, today),
+                ).fetchone()[0]
+                if not reserved and used + legacy >= getattr(
+                    settings, "max_digest_messages_per_day", 1
+                ):
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO daily_digest_reservations VALUES (?,?,?)",
+                    (row["user_id"], batch_id, today),
+                )
                 recipients.append(dict(row))
             status = "sending" if eligible else "skipped"
             conn.execute(

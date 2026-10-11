@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
+import sqlite3
+from contextlib import closing
 
 import httpx
 from bs4 import BeautifulSoup
@@ -25,6 +29,28 @@ async def summarize(title: str, content_html: str) -> str:
         return title
     if not text:
         return title
+    cache_key = hashlib.sha256(
+        json.dumps(
+            [
+                title,
+                content_html,
+                settings.deepseek_model,
+                getattr(settings, "summary_prompt_version", "important-information-v1"),
+            ],
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    database_file = getattr(settings, "database_file", None)
+    if database_file is not None:
+        try:
+            with closing(sqlite3.connect(database_file)) as connection:
+                row = connection.execute(
+                    "SELECT summary FROM summary_cache WHERE cache_key=?", (cache_key,)
+                ).fetchone()
+            if row:
+                return row[0]
+        except sqlite3.Error:
+            log.warning("摘要缓存读取失败，将尝试生成摘要")
     prompt = (
         "请总结以下通知的核心信息，面向大学生，语言简洁，优先控制在 50-80 字。"
         "必须优先保留原文中的时间（含报名截止时间）、地点、QQ群号、联系方式（联系人、电话、邮箱）"
@@ -48,6 +74,15 @@ async def summarize(title: str, content_html: str) -> str:
                 )
                 response.raise_for_status()
                 summary = response.json()["choices"][0]["message"]["content"].strip()
+                if summary and database_file is not None:
+                    try:
+                        with closing(sqlite3.connect(database_file)) as connection, connection:
+                            connection.execute(
+                                "INSERT OR REPLACE INTO summary_cache VALUES (?,?,datetime('now'))",
+                                (cache_key, summary),
+                            )
+                    except sqlite3.Error:
+                        log.warning("摘要缓存写入失败，不阻塞本次发送")
                 return summary or title
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
