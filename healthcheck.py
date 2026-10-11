@@ -13,6 +13,12 @@ log = logging.getLogger(__name__)
 def run_healthcheck() -> bool:
     """只检查本地运行条件，不联网、不抓取、不发送邮件。"""
     ok = True
+    try:
+        if hasattr(settings, "unsubscribe_url"):
+            settings.unsubscribe_url
+    except ValueError:
+        log.error("UNSUBSCRIBE_URL 配置无效（不显示配置值）")
+        ok = False
     required = ("QQ_EMAIL", "QQ_SMTP_AUTH_CODE", "MY_EMAIL")
     try:
         if settings.ai_summary_enabled:

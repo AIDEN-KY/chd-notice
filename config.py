@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -270,7 +271,26 @@ class Settings:
     @property
     def unsubscribe_url(self) -> str:
         """可选的真实退订页；未配置时由邮件模块降级为 mailto 链接。"""
-        return os.getenv("UNSUBSCRIBE_URL", "").strip()
+        raw = os.getenv("UNSUBSCRIBE_URL", "")
+        value = raw.strip()
+        if not value:
+            return ""
+        try:
+            parsed = urlsplit(value)
+            if (
+                any(ord(c) < 32 or ord(c) == 127 for c in raw)
+                or any(c.isspace() for c in value)
+                or "\\" in value
+                or parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or (parsed.port is not None and parsed.port < 1)
+            ):
+                raise ValueError
+        except ValueError:
+            raise ValueError("UNSUBSCRIBE_URL 必须为不含凭据或控制字符的有效 HTTPS URL") from None
+        return value
 
 
 settings = Settings()

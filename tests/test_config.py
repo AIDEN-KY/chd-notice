@@ -9,6 +9,47 @@ import healthcheck
 from config import Settings
 
 
+@pytest.mark.parametrize(
+    "url", ["", "https://example.test/unsubscribe", "https://example.test:8443/u"]
+)
+def test_unsubscribe_url_allows_empty_or_https(monkeypatch, url):
+    monkeypatch.setenv("UNSUBSCRIBE_URL", url)
+    assert Settings().unsubscribe_url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert('PRIVATE_URL_MARKER')",
+        "http://example.test/PRIVATE_URL_MARKER",
+        "https://user:PRIVATE_URL_MARKER@example.test/unsubscribe",
+        "https://example.test/PRIVATE_URL_MARKER\nheader",
+        "https://example.test:invalid/PRIVATE_URL_MARKER",
+        "//example.test/PRIVATE_URL_MARKER",
+    ],
+)
+def test_unsubscribe_url_rejects_unsafe_configuration_without_echo(monkeypatch, url):
+    monkeypatch.setenv("UNSUBSCRIBE_URL", url)
+    with pytest.raises(ValueError) as exc:
+        _ = Settings().unsubscribe_url
+    assert "UNSUBSCRIBE_URL" in str(exc.value)
+    assert "PRIVATE_URL_MARKER" not in str(exc.value)
+
+
+def test_doctor_rejects_unsafe_unsubscribe_url(local_health_configuration, monkeypatch, caplog):
+    configuration = Settings(
+        **{
+            name: getattr(local_health_configuration, name)
+            for name in ("auth_file", "database_file", "attachment_dir", "log_dir")
+        }
+    )
+    monkeypatch.setattr(healthcheck, "settings", configuration)
+    monkeypatch.setenv("AI_SUMMARY_ENABLED", "false")
+    monkeypatch.setenv("UNSUBSCRIBE_URL", "javascript:alert('PRIVATE_URL_MARKER')")
+    assert healthcheck.run_healthcheck() is False
+    assert "PRIVATE_URL_MARKER" not in caplog.text
+
+
 @pytest.fixture
 def local_health_configuration(tmp_path, monkeypatch):
     auth = tmp_path / "auth.json"
