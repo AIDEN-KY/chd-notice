@@ -7,7 +7,7 @@ import re
 import sqlite3
 from contextlib import closing, contextmanager
 from datetime import datetime
-from typing import Iterator, Literal
+from typing import Callable, Iterator, Literal
 from urllib.parse import parse_qs, urlparse
 
 from config import settings
@@ -860,12 +860,17 @@ def get_task_health() -> dict:
     }
 
 
-def prepare_recipient_batches(users: list[dict]) -> None:
+def prepare_recipient_batches(
+    users: list[dict], *, exclude_notice: Callable[[dict], bool] | None = None
+) -> None:
     """逐用户/修订建立稳定快照；不依赖旧版全局 sent。"""
     now = datetime.now(settings.timezone).isoformat(timespec="seconds")
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         notices = [_row_to_notice(row) for row in conn.execute("SELECT * FROM notices ORDER BY id")]
+        # 先过滤再应用数量上限，避免敏感积压阻塞后面的允许通知。
+        if exclude_notice is not None:
+            notices = [notice for notice in notices if not exclude_notice(notice)]
         groups: dict[tuple, tuple[list[dict], list[dict]]] = {}
         for user in users:
             pending = [

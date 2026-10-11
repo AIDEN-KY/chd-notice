@@ -7,6 +7,7 @@ import logging
 import time
 
 from config import settings
+from content_policy import DEFAULT_EXCLUDED_KEYWORDS, notice_is_excluded
 from db import (
     claim_admin_alert,
     claim_batch_recipients,
@@ -14,6 +15,7 @@ from db import (
     finish_task_run,
     get_active_users,
     get_batch_notices,
+    get_notice_by_url,
     get_retryable_batches,
     init_db,
     prepare_recipient_batches,
@@ -151,10 +153,23 @@ async def _send_pending_today(deadline: float | None = None) -> int:
     if not getattr(settings, "multi_user_delivery_ready", False):
         log.warning("多人投递尚未完成收件人状态及并发保护，正式日报暂不发送")
         return 0
-    prepare_recipient_batches(users)
+    keywords = getattr(settings, "ai_excluded_keywords", DEFAULT_EXCLUDED_KEYWORDS)
+
+    def excluded(notice):
+        return notice_is_excluded(notice, keywords)
+
+    prepare_recipient_batches(users, exclude_notice=excluded)
     delivered = 0
     for batch in get_retryable_batches():
         notices = get_batch_notices(batch["id"])
+        # 重试不改写冻结邮件；策略变化或最新正文敏感时整批保留待审核。
+        # 已接受/unknown 状态不重置，不领取收件人、不消耗当日预算。
+        if any(
+            excluded(notice) or excluded(get_notice_by_url(notice["detail_url"]) or notice)
+            for notice in notices
+        ):
+            log.warning("批次 %s 被内容策略阻止；reason=excluded_distribution", batch["id"])
+            continue
         try:
             _check_budget(deadline)
             await _summarize_batch(notices, deadline)
