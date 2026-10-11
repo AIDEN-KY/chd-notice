@@ -2,11 +2,34 @@
 
 import sys
 
+import pytest
+
 import db
 import main
 from tests.test_config import local_health_configuration as _local_health_configuration
 
 local_health_configuration = _local_health_configuration
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["--confirm-send", "--notice-id", "1"],
+        ["--confirm-send", "--email", "not-owner@example.test"],
+    ],
+)
+def test_bcc_trial_cli_rejects_missing_confirmation_or_production_parameters(monkeypatch, args):
+    monkeypatch.setattr(sys, "argv", ["main.py", "send-bcc-test", *args])
+
+    def forbidden():
+        pytest.fail("Rejected trial command must not configure logging or initialize storage")
+
+    monkeypatch.setattr(main, "configure_logging", forbidden)
+    monkeypatch.setattr(main, "init_db", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        main.main()
+    assert exc.value.code == 2
 
 
 def test_doctor_cli_does_not_create_database_or_runtime_directories(

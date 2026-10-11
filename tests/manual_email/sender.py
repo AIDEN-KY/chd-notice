@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 
 from config import settings
@@ -12,6 +13,48 @@ from mailer import send_digest
 from summarizer import summarize
 
 log = logging.getLogger(__name__)
+
+
+async def send_bcc_test_email(*, confirm_send: bool = False) -> int:
+    """显式试投：合成正文，两自有邮箱，正式群发保护不变。"""
+    if not confirm_send:
+        raise ValueError("需要 --confirm-send 确认向两个自有邮箱发送合成测试邮件")
+    recipients = [validate_email(settings.my_email), validate_email(settings.qq_email)]
+    if len(set(recipients)) != 2:
+        raise ValueError("MY_EMAIL 与 QQ_EMAIL 必须为两个不同的自有测试邮箱")
+    if settings.database_file.exists():
+        uri = settings.database_file.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='users'").fetchone():
+                for address in recipients:
+                    row = conn.execute(
+                        "SELECT status FROM users WHERE email_key=?", (address,)
+                    ).fetchone()
+                    if row and row[0] != "active":
+                        raise ValueError("测试收件人已暂停或退订，不发送测试邮件")
+    notice = {
+        "title": "合成通知：双邮箱 BCC 验收",
+        "content_html": "<p>本通知完全合成，不含学校通知。活动时间：2030年1月1日18:00；"
+        "活动地点：测试报告厅；联系人：测试老师；邮箱：teacher@example.test。</p>",
+        "detail_url": "https://example.com/",
+        "attachments": [],
+    }
+    notice["summary"] = await summarize(notice["title"], notice["content_html"], use_cache=False)
+    try:
+        result = await asyncio.to_thread(
+            send_digest,
+            [notice],
+            datetime.now(settings.timezone).date().isoformat(),
+            None,
+            subject_prefix="【合成 BCC 测试】",
+            recipients=recipients,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"合成 BCC 测试未确认成功；错误类型={type(exc).__name__}") from None
+    if result.get("refused") or set(result.get("accepted", [])) != set(recipients):
+        raise ValueError("测试存在拒收或不完整投递结果；请核对收件，不自动重试")
+    log.info("合成 BCC 测试：SMTP 接受 2 个地址；请人工确认收件，不修改正式投递记录")
+    return 2
 
 
 def get_test_notice(notice_id: int | None = None) -> dict | None:

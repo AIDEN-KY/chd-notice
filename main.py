@@ -99,6 +99,7 @@ def main() -> None:
             "send-now",
             "send-pending",
             "send-test",
+            "send-bcc-test",
             "scheduler",
             "users",
             "deliveries",
@@ -106,6 +107,7 @@ def main() -> None:
         help="配置检查 / 初始化登录 / 立即抓取 / 完整日报 / 仅发送全部待发通知 / 启动定时器",
     )
     parser.add_argument("--notice-id", type=int, help="send-test 指定数据库通知 ID")
+    parser.add_argument("--confirm-send", action="store_true", help="确认两自有邮箱合成 BCC 试投")
     parser.add_argument("--output", type=Path, help="backup/restore 的新目标文件")
     parser.add_argument("--input", type=Path, help="restore 的本地备份文件")
     parser.add_argument(
@@ -128,6 +130,32 @@ def main() -> None:
     parser.add_argument("--batch-id", type=int, help="deliveries 核对批次 ID")
     parser.add_argument("--reason", help="deliveries 人工核对依据（不要填敏感信息）")
     args = parser.parse_args()
+    if args.confirm_send and args.command != "send-bcc-test":
+        parser.error("--confirm-send 仅用于 send-bcc-test")
+    if args.command == "send-bcc-test":
+        if not args.confirm_send:
+            parser.error("必须以 --confirm-send 明确确认真实 API/SMTP 试投")
+        if any(
+            value is not None
+            for value in (
+                args.notice_id,
+                args.output,
+                args.input,
+                args.action,
+                args.email,
+                args.user_id,
+                args.consent_source,
+                args.batch_id,
+                args.reason,
+            )
+        ):
+            parser.error("send-bcc-test 不接受真实通知、用户或数据库操作参数")
+        from tests.manual_email.sender import send_bcc_test_email
+
+        configure_logging()
+        with task_lock(settings.database_file.with_suffix(".task.lock")):
+            asyncio.run(send_bcc_test_email(confirm_send=True))
+        return
     if args.command not in {"backup", "restore"} and (args.output or args.input):
         parser.error("--input/--output 仅用于 backup/restore")
     if args.command in {"backup", "restore"}:

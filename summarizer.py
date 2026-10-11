@@ -66,7 +66,9 @@ def _preserve_fields(summary: str, fields: list[str]) -> str:
     return summary
 
 
-async def summarize(title: str, content_html: str) -> str:
+async def summarize(title: str, content_html: str, *, use_cache: bool = True) -> str:
+    if not use_cache:
+        return await _summarize(title, content_html, use_cache=False)
     # 并发请求同一正文时共用一个正在进行的 API 请求；策略检查先于合并。
     if not settings.ai_summary_enabled or notice_is_excluded(
         {"title": title, "content_html": content_html}, settings.ai_excluded_keywords
@@ -98,7 +100,7 @@ async def summarize(title: str, content_html: str) -> str:
         _inflight.pop(key, None)
 
 
-async def _summarize(title: str, content_html: str) -> str:
+async def _summarize(title: str, content_html: str, *, use_cache: bool = True) -> str:
     if not settings.ai_summary_enabled:
         log.info("AI 摘要已关闭；reason=ai_disabled")
         return title
@@ -127,7 +129,7 @@ async def _summarize(title: str, content_html: str) -> str:
             ensure_ascii=False,
         ).encode("utf-8")
     ).hexdigest()
-    database_file = getattr(settings, "database_file", None)
+    database_file = getattr(settings, "database_file", None) if use_cache else None
     if database_file is not None:
         try:
             with closing(sqlite3.connect(database_file)) as connection:
