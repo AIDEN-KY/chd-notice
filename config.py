@@ -83,6 +83,9 @@ class Settings:
     schedule_minute: int = 0
     deepseek_url: str = "https://api.deepseek.com/chat/completions"
     deepseek_model: str = "deepseek-chat"
+    pdf_preview_host: str = "portal.chd.edu.cn"
+    pdf_preview_path: str = "/qljfwapp/sys/emapcomponent/pdf/index.do"
+    attachment_download_path_prefix: str = "/qljfwapp/sys/emapcomponent/file/getAttachmentFile/"
     summary_prompt_version: str = "important-information-v1"
     max_notices_per_digest: int = field(
         default_factory=lambda: _positive_int_env("MAX_NOTICES_PER_DIGEST", 20)

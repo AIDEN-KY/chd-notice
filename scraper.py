@@ -10,7 +10,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -423,6 +423,38 @@ def _looks_like_cas_login(prefix: bytes) -> bool:
     )
 
 
+def _attachment_download_url(url: str) -> str:
+    """只解包学校已知 PDF 预览路由，校验两端且不访问预览页面。"""
+    _validate_attachment_url(url)
+    parsed = urlparse(url)
+    host = getattr(settings, "pdf_preview_host", "portal.chd.edu.cn")
+    preview_path = getattr(settings, "pdf_preview_path", "/qljfwapp/sys/emapcomponent/pdf/index.do")
+    if parsed.hostname != host or parsed.path != preview_path:
+        return url
+    values = parse_qs(parsed.query, keep_blank_values=True).get("file", [])
+    if len(values) != 1 or not values[0].strip():
+        raise ValueError("PDF 预览链接必须包含单个非空 file 参数")
+    source = values[0]
+    if any(character in source for character in ("\\", "\r", "\n", "\t")):
+        raise ValueError("PDF 下载地址包含非法字符")
+    # parse_qs 已解码一次，不重复 unquote，不把任意 file 参数当作可信 URL。
+    target = urljoin(url, source)
+    _validate_attachment_url(target)
+    download = urlparse(target)
+    prefix = getattr(
+        settings,
+        "attachment_download_path_prefix",
+        "/qljfwapp/sys/emapcomponent/file/getAttachmentFile/",
+    )
+    if (
+        download.hostname != parsed.hostname
+        or download.fragment
+        or not re.fullmatch(re.escape(prefix) + r"[0-9a-fA-F]+\.do", download.path)
+    ):
+        raise ValueError("PDF 预览参数不是同站学校附件下载地址")
+    return target
+
+
 async def _download_attachment(context: BrowserContext, url: str, name: str) -> dict:
     """独立流式传输：复用浏览器匹配 URL 的 Cookie，不使用已缓冲的 APIResponse.body。"""
     item = {"name": name, "url": url, "path": "", "size": 0}
@@ -431,7 +463,7 @@ async def _download_attachment(context: BrowserContext, url: str, name: str) -> 
         limit = getattr(settings, "max_single_attachment_bytes", 20 * 1024 * 1024)
         if limit <= 0:
             raise ValueError("单文件大小预算必须大于零")
-        current = url
+        current = _attachment_download_url(url)
         redirects = getattr(settings, "max_attachment_redirects", 3)
         _validate_attachment_url(current)
         async with httpx.AsyncClient(
