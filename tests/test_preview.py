@@ -123,3 +123,18 @@ def test_preview_damaged_database_is_reported_without_repair(delivery_setup, cap
     report = _run_preview(delivery_setup, capsys)
     assert report["database_status"] == "unreadable_or_incompatible"
     assert path.read_bytes() == before
+
+
+def test_preview_single_user_release_requires_only_configured_owner(delivery_setup, capsys):
+    service.settings.multi_user_delivery_ready = False
+    service.settings.single_user_delivery_ready = True
+    service.settings.my_email = "owner@example.test"
+    db.add_user("owner@example.test", consent_source="owner-explicit-consent")
+    report = _run_preview(delivery_setup, capsys)
+    assert report["delivery_enabled"] is True
+    assert report["delivery_mode"] == "single_my_email"
+
+    db.add_user("other@example.test", consent_source="other-explicit-consent")
+    report = _run_preview(delivery_setup, capsys)
+    assert report["delivery_enabled"] is False
+    assert report["delivery_mode"] == "single_my_email_blocked"

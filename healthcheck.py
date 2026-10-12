@@ -44,6 +44,12 @@ def run_healthcheck() -> bool:
     except ValueError:
         log.error("HISTORY_SCAN_ENABLED 配置无效（不显示配置值）")
         ok = False
+    try:
+        single_user_ready = getattr(settings, "single_user_delivery_ready", False)
+    except ValueError:
+        log.error("SINGLE_USER_DELIVERY_READY 配置无效（不显示配置值）")
+        single_user_ready = False
+        ok = False
     for name in ("QQ_EMAIL", "MY_EMAIL"):
         if os.getenv(name, "").strip():
             try:
@@ -99,6 +105,10 @@ def run_healthcheck() -> bool:
         log.info("数据库将在首次运行时创建：%s", settings.database_file)
 
     log.info("配置检查%s", "通过" if ok else "未通过")
-    if not settings.multi_user_delivery_ready:
+    if settings.multi_user_delivery_ready:
+        log.info("多人正式发送入口已启用")
+    elif single_user_ready:
+        log.info("单用户正式发送入口已启用；仅允许唯一启用用户等于 MY_EMAIL")
+    else:
         log.warning("多人正式发送保护尚未完成，日报发送入口保持关闭；管理员测试命令不群发")
     return ok

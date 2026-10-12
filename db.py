@@ -319,7 +319,8 @@ def get_delivery_preview() -> dict:
         "attachments_with_unknown_size": 0,
         "history_policy": "subscription_watermark",
         "pending_fetched_date_range": None,
-        "delivery_enabled": getattr(settings, "multi_user_delivery_ready", False),
+        "delivery_enabled": False,
+        "delivery_mode": "disabled",
     }
     if not settings.database_file.is_file():
         return report
@@ -331,7 +332,7 @@ def get_delivery_preview() -> dict:
             conn.execute("PRAGMA query_only=ON")
             conn.execute("BEGIN")
             users = conn.execute(
-                "SELECT id,start_after_notice_id FROM users WHERE status='active'"
+                "SELECT id,email_key,start_after_notice_id FROM users WHERE status='active'"
             ).fetchall()
             # 未分配的新修订，以及仍可有限重试的固定快照；不能把 unknown 当作待自动发送。
             fresh = conn.execute(
@@ -399,6 +400,21 @@ def get_delivery_preview() -> dict:
             else:
                 unknown_sizes += 1
     dates = sorted(n["fetched_date"] for n in unique.values() if n.get("fetched_date"))
+    multi_ready = getattr(settings, "multi_user_delivery_ready", False)
+    single_ready = getattr(settings, "single_user_delivery_ready", False)
+    if multi_ready:
+        delivery_enabled = True
+        delivery_mode = "multi_user"
+    elif single_ready:
+        try:
+            owner = validate_email(settings.my_email)
+        except (AttributeError, ValueError):
+            owner = None
+        delivery_enabled = owner is not None and len(users) == 1 and users[0]["email_key"] == owner
+        delivery_mode = "single_my_email" if delivery_enabled else "single_my_email_blocked"
+    else:
+        delivery_enabled = False
+        delivery_mode = "disabled"
     report.update(
         database_status="ready",
         active_users=len(users),
@@ -410,6 +426,8 @@ def get_delivery_preview() -> dict:
         estimated_attachment_bytes=sum(sizes),
         attachments_with_unknown_size=unknown_sizes,
         pending_fetched_date_range=[dates[0], dates[-1]] if dates else None,
+        delivery_enabled=delivery_enabled,
+        delivery_mode=delivery_mode,
     )
     return report
 

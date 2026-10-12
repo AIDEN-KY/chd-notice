@@ -102,3 +102,22 @@ def test_summary_concurrency_above_hard_limit_is_rejected(monkeypatch):
     with pytest.raises(ValueError) as exc:
         Settings()
     assert "999" not in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["true", "1"])
+def test_single_user_delivery_requires_explicit_local_opt_in(monkeypatch, value):
+    monkeypatch.setenv("SINGLE_USER_DELIVERY_READY", value)
+    assert Settings().single_user_delivery_ready is True
+
+
+def test_single_user_delivery_is_closed_by_default(monkeypatch):
+    monkeypatch.delenv("SINGLE_USER_DELIVERY_READY", raising=False)
+    assert Settings().single_user_delivery_ready is False
+
+
+def test_single_user_delivery_rejects_invalid_flag_without_echo(monkeypatch):
+    monkeypatch.setenv("SINGLE_USER_DELIVERY_READY", "PRIVATE_INVALID_VALUE")
+    with pytest.raises(ValueError) as exc:
+        _ = Settings().single_user_delivery_ready
+    assert "SINGLE_USER_DELIVERY_READY" in str(exc.value)
+    assert "PRIVATE_INVALID_VALUE" not in str(exc.value)

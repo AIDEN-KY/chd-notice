@@ -238,6 +238,14 @@ class Settings:
         return value in {"true", "1"}
 
     @property
+    def single_user_delivery_ready(self) -> bool:
+        """本机显式放行，仅允许 users 中唯一启用用户等于 MY_EMAIL。"""
+        value = os.getenv("SINGLE_USER_DELIVERY_READY", "false").strip().lower()
+        if value not in {"true", "false", "1", "0"}:
+            raise ValueError("SINGLE_USER_DELIVERY_READY 必须为 true/false/1/0")
+        return value in {"true", "1"}
+
+    @property
     def ai_summary_enabled(self) -> bool:
         value = os.getenv("AI_SUMMARY_ENABLED", "true").strip().lower()
         if value not in {"true", "false", "1", "0"}:

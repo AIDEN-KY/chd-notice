@@ -204,6 +204,89 @@ def test_group_delivery_stays_closed_until_remaining_safety_work(tmp_path, monke
     assert len(db.get_unsent_notices()) == 1
 
 
+def test_single_user_release_sends_only_to_configured_owner(tmp_path, monkeypatch):
+    import service
+    from tests.test_service import (
+        _configure_temp_database,
+        _insert_historical_notice,
+        _run_immediate,
+    )
+
+    _configure_temp_database(tmp_path, monkeypatch)
+    db.add_user("owner@example.test", consent_source="owner-explicit-consent")
+    _insert_historical_notice()
+    monkeypatch.setattr(
+        service,
+        "settings",
+        SimpleNamespace(
+            database_file=tmp_path / "notices.db",
+            timezone=ZoneInfo("Asia/Shanghai"),
+            multi_user_delivery_ready=False,
+            single_user_delivery_ready=True,
+            my_email="owner@example.test",
+        ),
+    )
+    envelopes = []
+
+    async def summarize(title, _content):
+        return title
+
+    def send_digest(_notices, _date, _message_id, *, recipients):
+        envelopes.append(recipients)
+        return {"accepted": list(recipients), "refused": {}}
+
+    async def to_thread(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(service, "summarize", summarize)
+    monkeypatch.setattr(service, "send_digest", send_digest)
+    monkeypatch.setattr(service.asyncio, "to_thread", to_thread)
+    assert _run_immediate(service.send_pending_today()) == 1
+    assert envelopes == [["owner@example.test"]]
+
+
+@pytest.mark.parametrize(
+    "active_addresses",
+    [
+        ["other@example.test"],
+        ["owner@example.test", "other@example.test"],
+    ],
+)
+def test_single_user_release_fails_closed_for_wrong_or_multiple_users(
+    tmp_path, monkeypatch, active_addresses
+):
+    import service
+    from tests.test_service import (
+        _configure_temp_database,
+        _insert_historical_notice,
+        _run_immediate,
+    )
+
+    _configure_temp_database(tmp_path, monkeypatch)
+    for address in active_addresses:
+        db.add_user(address, consent_source="explicit-test-consent")
+    _insert_historical_notice()
+    monkeypatch.setattr(
+        service,
+        "settings",
+        SimpleNamespace(
+            database_file=tmp_path / "notices.db",
+            timezone=ZoneInfo("Asia/Shanghai"),
+            multi_user_delivery_ready=False,
+            single_user_delivery_ready=True,
+            my_email="owner@example.test",
+        ),
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("release guard must block summary and SMTP")
+
+    monkeypatch.setattr(service, "summarize", forbidden)
+    monkeypatch.setattr(service, "send_digest", forbidden)
+    assert _run_immediate(service.send_pending_today()) == 0
+    assert len(db.get_unsent_notices()) == 1
+
+
 def test_users_cli_add_and_pause_are_local_only(tmp_path, monkeypatch, capsys):
     import sys
 

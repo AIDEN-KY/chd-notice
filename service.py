@@ -23,6 +23,7 @@ from db import (
     recover_interrupted_batches,
     start_task_run,
     store_batch_summaries,
+    validate_email,
 )
 from mailer import send_digest, send_system_alert
 from scraper import SessionExpiredError, scrape_notices
@@ -34,6 +35,29 @@ log = logging.getLogger(__name__)
 
 class TaskBudgetExceeded(TimeoutError):
     pass
+
+
+def _delivery_feature_enabled() -> bool:
+    return bool(
+        getattr(settings, "multi_user_delivery_ready", False)
+        or getattr(settings, "single_user_delivery_ready", False)
+    )
+
+
+def _release_allows_users(users: list[dict]) -> bool:
+    if getattr(settings, "multi_user_delivery_ready", False):
+        return True
+    if not getattr(settings, "single_user_delivery_ready", False):
+        return False
+    try:
+        owner = validate_email(settings.my_email)
+    except (AttributeError, ValueError):
+        log.error("单用户正式发送保护阻止投递；reason=invalid_my_email")
+        return False
+    if len(users) != 1 or users[0].get("email_key") != owner:
+        log.error("单用户正式发送保护阻止投递；reason=recipient_set_mismatch")
+        return False
+    return True
 
 
 def _check_budget(deadline: float) -> None:
@@ -134,7 +158,7 @@ async def _try_send_alert(title: str, detail: str) -> None:
 
 
 async def send_pending_today() -> int:
-    if not getattr(settings, "multi_user_delivery_ready", False):
+    if not _delivery_feature_enabled():
         return await _send_pending_today()
     with task_lock(settings.database_file.with_suffix(".task.lock")):
         init_db()
@@ -153,8 +177,11 @@ async def _send_pending_today(deadline: float | None = None) -> int:
     if not users:
         log.info("没有启用的订阅者，不生成摘要、不发送日报；通知保持待发")
         return 0
-    if not getattr(settings, "multi_user_delivery_ready", False):
-        log.warning("多人投递尚未完成收件人状态及并发保护，正式日报暂不发送")
+    if not _release_allows_users(users):
+        if getattr(settings, "single_user_delivery_ready", False):
+            log.warning("单用户正式发送门禁未满足，正式日报暂不发送")
+        else:
+            log.warning("多人投递尚未完成收件人状态及并发保护，正式日报暂不发送")
         return 0
     keywords = getattr(settings, "ai_excluded_keywords", DEFAULT_EXCLUDED_KEYWORDS)
 
